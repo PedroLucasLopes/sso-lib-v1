@@ -1,0 +1,43 @@
+# Publica no GitHub Packages quando uma tag `v*` chega ao repositorio.
+#
+# O token e o GITHUB_TOKEN da propria execucao, com `packages: write`. Nenhum
+# token pessoal fica guardado em secret, e nenhum sai daqui para o pacote.
+name: Publish package
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: '@pedrolucaslopes'
+          cache: npm
+
+      - run: npm ci
+
+      # Tag e versao precisam bater. Sem isto, `git tag v0.2.0` sobre um
+      # package.json ainda em 0.1.0 tentaria republicar a versao antiga.
+      - name: Check tag against package version
+        run: |
+          VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "A tag $GITHUB_REF_NAME nao bate com a versao $VERSION do package.json" >&2
+            exit 1
+          fi
+
+      # `prepublishOnly` compila antes de empacotar.
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

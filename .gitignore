@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Segredos. O token de publicacao vem do GitHub Actions, nunca de arquivo.
+.env
+.env.*
+!.env.example
+.npmrc
