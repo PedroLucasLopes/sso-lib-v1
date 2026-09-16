@@ -135,7 +135,7 @@ export async function ensureProjectUser(
 
   const papel = await uma<{ id: string }>(
     db,
-    'SELECT id FROM "Role" WHERE name = $1::"RoleEnum" AND "projectId" = $2',
+    'SELECT id FROM "Role" WHERE name = $1 AND "projectId" = $2',
     [options.role, projeto.id],
   );
 

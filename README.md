@@ -59,7 +59,7 @@ Nada no `main.ts`: o módulo registra o `cookie-parser` sozinho.
 | `APP_PRIVATE_KEY_FILE` · `APP_PRIVATE_KEY_BASE64` · `APP_PRIVATE_KEY` | uma delas | chave privada gerada pelo SSO. Arquivo de secret montado é a preferida |
 | `APP_BASE_URL` | sim | base pública da API vista pelo navegador, com o prefixo global. Ex.: `https://exemplo.com/api` |
 | `COOKIE_SECRET` | sim | 32 bytes em hex, próprio desta API: `openssl rand -hex 32` |
-| `SSO_INTERNAL_URL` | não | endereço de rede do SSO, quando diferente do issuer. Ex.: `http://sso:8080/sso` |
+| `SSO_INTERNAL_URL` | não | endereço de rede do SSO, quando diferente do issuer. Ex.: `http://host.docker.internal:8080/sso`, de dentro de um container |
 | `APP_COOKIE_PREFIX` | não | prefixo dos cookies. Único entre aplicações que dividam host |
 | `APP_POST_LOGIN_REDIRECT` | não | destino depois do login, quando não há `returnTo` |
 | `APP_SESSION_MAX_AGE` | não | vida do cookie de sessão, em segundos. Acompanha o refresh token do SSO |
@@ -80,7 +80,7 @@ sem mostrar valor nenhum.
 |---|---|
 | `@SsoPublic()` | ignora sessão e RBAC. É o nível do health check |
 | `@SsoAuthenticated()` | exige sessão, dispensa a permissão por rota |
-| _(nenhum)_ | exige sessão **e** permissão |
+| _(nenhum)_ | exige sessão **e** permissão. Sem ela, o mesmo 404 de uma rota que não existe |
 | `@CurrentUser()` | injeta a identidade no handler |
 | `@CurrentToken()` | injeta o access token verificado, para repassar adiante |
 

@@ -5,6 +5,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -160,11 +161,22 @@ export class SsoRbacGuard implements CanActivate {
     const path = this.normalize(req.path);
     const method = req.method.toUpperCase();
 
-    if (!this.isAllowed(user.permissions, path, method)) {
-      throw new ForbiddenException(`sem permissao para ${method} ${path}`);
-    }
+    if (this.isAllowed(user.permissions, path, method)) return true;
 
-    return true;
+    /* Rota nova ou permissao recem-concedida: pergunta de novo ao SSO antes de
+     * negar, entao o que se libera no console vale na requisicao seguinte. */
+    user.permissions = roles.length
+      ? await this.permissions.forRoles(roles, claims.perm, { revalidate: true })
+      : [];
+
+    if (this.isAllowed(user.permissions, path, method)) return true;
+
+    this.logger.warn(`negado: ${roles.join(', ') || 'sem papel'} em ${method} ${path}`);
+
+    /* Sem permissao, ou rota que nao existe no catalogo do SSO: o mesmo 404 de
+     * um caminho que nao existe na aplicacao. Quem nao pode usar a rota nao
+     * descobre que ela existe (RFC 9110 secao 15.5.4). */
+    throw new NotFoundException(`Cannot ${req.method} ${req.originalUrl}`);
   }
 
   /**

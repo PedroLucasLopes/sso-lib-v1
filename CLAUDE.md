@@ -43,7 +43,8 @@ registrar o dele.
 ## 📦 Distribuição
 
 O pacote é **`@pedrolucaslopes/sso-client`**, privado, no GitHub Packages, com repositório próprio em
-`PedroLucasLopes/sso-client`. O escopo do npm tem de ser o dono no GitHub, em minúsculas.
+`PedroLucasLopes/sso-lib-v1`. O nome do repositório não precisa bater com o do pacote; o escopo do npm
+tem de ser o dono no GitHub, em minúsculas.
 
 - **Publicar:** `npm version patch` e `git push --follow-tags`. A tag `v*` dispara
   `.github/workflows/publish.yml`, que confere a tag contra a versão e publica com o `GITHUB_TOKEN`
@@ -52,8 +53,10 @@ O pacote é **`@pedrolucaslopes/sso-client`**, privado, no GitHub Packages, com 
   `//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}`. O token, com `read:packages`, vem do
   ambiente. No Docker entra como secret do BuildKit, nunca como `ARG` ou `ENV`, que ficam na imagem.
 
-Até a primeira publicação, o krloc ainda consome pelo **workspace npm** da raiz. Os passos que faltam
-estão no `CLAUDE.md` da raiz.
+Publicado desde a `0.1.0`. Quem consome instala por versão, e o krloc faz exatamente isso: não há
+workspace npm nem link de pasta. Para testar uma mudança antes de publicar, `npm pack` aqui e
+`npm install --no-save <arquivo .tgz>` na aplicação; a próxima instalação normal volta à versão
+publicada.
 
 **Não introduza dependência de nada fora de `sso-client/src`.** É o que mantém o pacote independente.
 
@@ -269,12 +272,17 @@ de encaminhar vítimas partindo de um domínio confiável. Há teste de regress�
 **O guard é global e fecha por padrão.** Rota nova nasce protegida; esquecer o decorator nega o
 acesso em vez de liberá-lo.
 
+**Rota negada responde 404, não 403.** O corpo é o mesmo do roteador do Nest para um caminho que não
+existe: `Cannot GET /api/accessory`. Rota que existe no código mas não está no catálogo do SSO, ou
+não está no papel de quem pediu, fica indistinguível de rota que não existe (RFC 9110 §15.5.4). Sem
+sessão continua 401, porque a pessoa precisa saber que tem de entrar.
+
 | Decorator | Efeito |
 |---|---|
 | `@SsoPublic()` | ignora sessão e RBAC. É o nível do health check |
 | `@SsoLogin()` | rota do fluxo de login, onde ainda não há sessão |
 | `@SsoAuthenticated()` | exige sessão válida, dispensa a checagem de permissão por rota |
-| _(nenhum)_ | exige sessão **e** permissão correspondente no token |
+| _(nenhum)_ | exige sessão **e** permissão do papel para a rota. Sem ela, 404 |
 | `@CurrentUser()` | injeta a identidade resolvida no handler |
 | `@CurrentToken()` | injeta o access token já verificado, para repassar adiante |
 
@@ -354,9 +362,24 @@ pública, que é conhecida. Só `RS256` é aceito.
 sem cooldown um token com `kid` aleatório viraria vetor de carga contra o SSO.
 
 **O token traz `roles`, não a lista de rotas.** RFC 9068 §2.2.3.1. O `SsoPermissionsService`
-resolve papel em permissões via `POST /oauth/permissions` e cacheia pelo hash `perm` que vem no
-token. Uma busca por papel, não uma por requisição, e a invalidação é automática: mudou a permissão
-do papel no SSO, muda o hash, a entrada velha deixa de ser consultada.
+resolve papel em permissões via `POST /oauth/permissions` e guarda o conjunto em memória, pela chave
+papel mais hash `perm` do token. Uma busca por papel, não uma por requisição.
+
+O banco do SSO é a fonte de verdade, e o que muda no console chega à aplicação por dois caminhos:
+
+| Mudança no SSO | Vale na aplicação | Como |
+|---|---|---|
+| permissão concedida, ou rota nova no papel | na requisição seguinte | antes de negar, o guard pergunta de novo ao SSO, no máximo uma vez a cada 5 segundos por papel |
+| permissão revogada | em até 60 segundos | cada conjunto guardado vale 60 segundos, e a requisição seguinte busca de novo |
+
+Só o hash não bastava. Ele muda dentro do token apenas quando o token é renovado, e isso leva até
+15 minutos: uma revogação feita no console continuava valendo esse tempo todo. **Com o SSO fora do
+ar**, o último conjunto conhecido segue valendo até ele voltar. A janela é curta por construção: sem
+o SSO nenhum token se renova, e o access token dura 15 minutos.
+
+**Papel que o SSO não conhece mais**, apagado ou renomeado, não é SSO fora do ar: o
+`POST /oauth/permissions` responde 404 e o conjunto vira vazio. Nada fica liberado até o token renovar
+com o nome novo, em até 15 minutos.
 
 Isso não é otimização, é correção. A versão anterior embutia as permissões no token, que crescia
 com o número de rotas. Com 38 rotas o cookie de sessão passou de 4266 bytes e **o navegador o
@@ -373,7 +396,7 @@ Lidas por `forRootFromEnv`. **O nome é contrato:** renomear uma delas quebra to
 | Chave | Uso |
 |---|---|
 | `SSO_ISSUER` | identidade pública do SSO, sem barra final |
-| `SSO_INTERNAL_URL` | endereço de rede do SSO, quando diferente. Ex.: `http://sso:8080/sso` |
+| `SSO_INTERNAL_URL` | endereço de rede do SSO, quando diferente. Ex.: `http://host.docker.internal:8080/sso`, de dentro de um container |
 | `APP_CLIENT_ID` | `Project.clientId` cadastrado no SSO |
 | `APP_PRIVATE_KEY_FILE` · `APP_PRIVATE_KEY_BASE64` · `APP_PRIVATE_KEY` | chave privada da aplicação, nesta ordem de preferência. Ver abaixo |
 | `APP_BASE_URL` | base pública desta aplicação, com o prefixo global |
@@ -405,6 +428,10 @@ linha, que sobrevive mal a uma variável de ambiente.
 - O caminho da requisição é sempre texto testado, nunca padrão.
 - Algoritmo de assinatura é allowlist fechada, nunca lido do token.
 - Rota sem decorator nega. Não inverta esse padrão.
+- Rota negada devolve o 404 do roteador, `Cannot <MÉTODO> <URL>`, sem `WWW-Authenticate`. Um 403 ali
+  revelaria que a rota existe.
+- Permissão concedida vale sem novo login, e a revogada, em até 60 segundos. Cache sem prazo volta a
+  deixar uma revogação valendo até o token renovar.
 - Escrita autenticada por cookie exige o header `X-CSRF-Token`. Não afrouxe isso sem trocar por
   outra defesa: a RFC 10017 §6.2.3.2 exige alguma.
 - O callback devolve documento, não `302`. Trocar por `res.redirect()` recria o laço de login com
