@@ -22,6 +22,7 @@ import {
 import type { SsoClientOptions } from '../config/ssoClientOptions';
 import type { SsoPermission, SsoUser } from '../dto/ssoSession.dto';
 import { SsoLoginRequiredException } from '../error/loginRequired.exception';
+import { isPageNavigation } from '../error/pageNavigation';
 import { SsoJwksVerifierService } from '../service/jwksVerifier.service';
 import { SsoPermissionsService } from '../service/permissions.service';
 import { SsoOAuthService } from '../service/ssoOAuth.service';
@@ -261,20 +262,11 @@ export class SsoRbacGuard implements CanActivate {
    * `safeReturnTo` como qualquer outro destino.
    */
   private returnToFor(req: Request): string {
-    if (this.isPageNavigation(req)) return req.originalUrl;
+    if (isPageNavigation(req)) return req.originalUrl;
 
     const referer = req.headers.referer;
 
     return typeof referer === 'string' ? referer : '';
-  }
-
-  /** Mesmo criterio do filtro: `Sec-Fetch-Dest` e header que so o navegador escreve. */
-  private isPageNavigation(req: Request): boolean {
-    const destino = req.headers['sec-fetch-dest'];
-
-    if (typeof destino === 'string') return destino === 'document';
-
-    return (req.headers.accept ?? '').includes('text/html');
   }
 
   /** Sem sessao utilizavel: manda ao login e volta para onde a pessoa estava. */

@@ -20,6 +20,9 @@ import type {
   SsoTokenResponse,
   SsoTransaction,
 } from '../dto/ssoSession.dto';
+import { SsoLoginFailedException } from '../error/loginFailed.exception';
+import type { SsoLoginErrorCode } from '../error/loginFailed.exception';
+import { isPageNavigation } from '../error/pageNavigation';
 import {
   CLIENT_ASSERTION_TYPE,
   SsoClientAssertionService,
@@ -46,6 +49,7 @@ export class SsoOAuthService {
   private readonly ownOrigin: string;
   private readonly appBaseUrl: string;
   private readonly refreshSkewSeconds: number;
+  private readonly loginErrorRedirect: URL | null;
 
   constructor(
     @Inject(SSO_CLIENT_OPTIONS) options: SsoClientOptions,
@@ -66,6 +70,11 @@ export class SsoOAuthService {
     this.ownOrigin = new URL(appBaseUrl).origin;
     this.appBaseUrl = appBaseUrl;
     this.refreshSkewSeconds = options.refreshSkewSeconds ?? 60;
+    // Montado agora, e nao no primeiro login recusado: endereco que nao monta
+    // derruba o boot, e nao a volta de alguem.
+    this.loginErrorRedirect = options.loginErrorRedirect
+      ? new URL(options.loginErrorRedirect, this.ownOrigin)
+      : null;
   }
 
   async beginLogin(res: Response, returnTo?: string): Promise<void> {
@@ -106,6 +115,18 @@ export class SsoOAuthService {
     res.redirect(url.toString());
   }
 
+  /**
+   * Volta do SSO: confere a resposta, troca o code e cria a sessao.
+   *
+   * A ordem das checagens e de seguranca, nao de estilo. O `state` vem antes
+   * de `error`: so uma resposta DESTA transacao diz alguma coisa sobre ela, e
+   * sem isso um link forjado para o callback escolheria o motivo mostrado a
+   * quem estivesse no meio de um login. O `iss` tambem vem antes: a RFC 9207
+   * secao 2.4 proibe supor que um erro veio do servidor certo sem conferir.
+   *
+   * Toda falha passa por `loginFailed`, que decide entre devolver a pessoa ao
+   * front e responder JSON.
+   */
   async completeLogin(
     req: Request,
     res: Response,
@@ -116,55 +137,169 @@ export class SsoOAuthService {
     this.cookies.clear(res, SSO_TX_COOKIE, { sameSite: 'lax' });
 
     if (!transaction) {
-      throw new UnauthorizedException('transacao de login ausente ou expirada');
-    }
-
-    // O SSO pode devolver um erro em vez de um code (RFC 6749 secao 4.1.2.1).
-    if (typeof query.error === 'string') {
-      const description =
-        typeof query.error_description === 'string'
-          ? query.error_description
-          : '';
-
-      throw new UnauthorizedException(
-        `o SSO recusou a autorizacao: ${query.error} ${description}`.trim(),
+      return this.loginFailed(
+        req,
+        res,
+        'login_expired',
+        'transacao de login ausente ou ilegivel',
       );
-    }
-
-    // RFC 9207: confere quem respondeu. E a defesa contra mix-up recomendada
-    // pela RFC 9700 secao 2.1 para quem fala com mais de um servidor.
-    if (typeof query.iss === 'string' && query.iss !== this.issuer) {
-      this.logger.warn(`resposta com iss inesperado: ${query.iss}`);
-      throw new UnauthorizedException('resposta veio de outro servidor');
     }
 
     if (
       typeof query.state !== 'string' ||
       !this.timingSafeEqual(query.state, transaction.state)
     ) {
-      throw new UnauthorizedException('state nao confere com a transacao');
+      return this.loginFailed(
+        req,
+        res,
+        'state_mismatch',
+        'state nao confere com a transacao',
+      );
     }
 
-    if (typeof query.code !== 'string' || !query.code) {
-      throw new UnauthorizedException('code ausente na resposta do SSO');
-    }
-
+    // Daqui em diante a resposta e desta transacao, e a volta ao front pode
+    // levar o destino que a pessoa tinha pedido.
+    const returnTo = this.safeReturnTo(transaction.returnTo);
     const age = Math.floor(Date.now() / 1000) - transaction.createdAt;
 
     if (age > TX_COOKIE_TTL_SECONDS) {
-      throw new UnauthorizedException('transacao de login expirada');
+      return this.loginFailed(
+        req,
+        res,
+        'login_expired',
+        'transacao de login expirada',
+        returnTo,
+      );
     }
 
-    const tokens = await this.requestTokens({
-      grant_type: 'authorization_code',
-      code: query.code,
-      code_verifier: transaction.codeVerifier,
-      redirect_uri: this.redirectUri,
-    });
+    // RFC 9207: confere quem respondeu. E a defesa contra mix-up recomendada
+    // pela RFC 9700 secao 2.1 para quem fala com mais de um servidor.
+    if (typeof query.iss === 'string' && query.iss !== this.issuer) {
+      return this.loginFailed(
+        req,
+        res,
+        'login_failed',
+        `resposta veio de outro servidor: iss ${JSON.stringify(query.iss)}`,
+        returnTo,
+      );
+    }
+
+    // O SSO pode devolver um erro em vez de um code (RFC 6749 secao 4.1.2.1).
+    // O texto dele vem pela URL: vai para o log, escapado, e nunca para a
+    // resposta.
+    if (typeof query.error === 'string') {
+      return this.loginFailed(
+        req,
+        res,
+        this.codeForAuthorizeError(query.error),
+        `o SSO recusou a autorizacao: ${JSON.stringify(query.error)} ${JSON.stringify(query.error_description ?? '')}`,
+        returnTo,
+      );
+    }
+
+    if (typeof query.code !== 'string' || !query.code) {
+      return this.loginFailed(
+        req,
+        res,
+        'login_failed',
+        'code ausente na resposta do SSO',
+        returnTo,
+      );
+    }
+
+    let tokens: SsoTokenResponse;
+
+    try {
+      tokens = await this.requestTokens({
+        grant_type: 'authorization_code',
+        code: query.code,
+        code_verifier: transaction.codeVerifier,
+        redirect_uri: this.redirectUri,
+      });
+    } catch (error) {
+      // 4xx e o SSO recusando este code ou esta aplicacao. O resto, 5xx,
+      // discovery ou rede, e o SSO que nao respondeu como devia.
+      return this.loginFailed(
+        req,
+        res,
+        error instanceof UnauthorizedException
+          ? 'login_failed'
+          : 'sso_unavailable',
+        `troca do code falhou: ${error instanceof Error ? error.message : String(error)}`,
+        returnTo,
+      );
+    }
 
     this.sessions.write(res, tokens);
 
-    this.bounceTo(res, this.safeReturnTo(transaction.returnTo));
+    this.bounceTo(res, returnTo);
+  }
+
+  /**
+   * O login nao se completou.
+   *
+   * Uma pessoa volta ao front, na tela de `loginErrorRedirect`, com um codigo
+   * que ele sabe explicar. A volta e o mesmo documento do login bem-sucedido, e
+   * nao um 302: a cadeia tambem comecou em outro site. Chamada que nao e
+   * navegacao de pagina, ou aplicacao sem a opcao, recebe o JSON de
+   * `SsoLoginFailedException`.
+   *
+   * Na URL vai so o codigo, de uma lista fechada, e o `returnTo`, quando a
+   * resposta era da transacao. O motivo detalhado fica no log.
+   */
+  private loginFailed(
+    req: Request,
+    res: Response,
+    code: SsoLoginErrorCode,
+    reason: string,
+    returnTo?: string,
+  ): void {
+    this.logger.warn(`login nao concluido (${code}): ${reason}`);
+
+    if (!this.loginErrorRedirect || !isPageNavigation(req)) {
+      throw new SsoLoginFailedException(code, reason);
+    }
+
+    const destino = new URL(this.loginErrorRedirect);
+
+    destino.searchParams.set('auth_error', code);
+
+    if (returnTo) {
+      destino.searchParams.set(
+        'returnTo',
+        this.forNavigation(new URL(returnTo, this.ownOrigin)),
+      );
+    }
+
+    this.bounceTo(res, this.forNavigation(destino), 'Redirecionando...');
+  }
+
+  /**
+   * Codigo do front para o erro que o SSO devolveu (RFC 6749 secao 4.1.2.1).
+   *
+   * `access_denied` e o unico que diz algo sobre a PESSOA: a conta nao tem
+   * papel no projeto. `server_error` e `temporarily_unavailable` sao o SSO
+   * falhando. O resto e pedido mal formado, que a pessoa nao tem como resolver.
+   */
+  private codeForAuthorizeError(error: string): SsoLoginErrorCode {
+    if (error === 'access_denied') return 'access_denied';
+
+    if (error === 'server_error' || error === 'temporarily_unavailable') {
+      return 'sso_unavailable';
+    }
+
+    return 'login_failed';
+  }
+
+  /**
+   * Destino desta origem vira caminho, como o `returnTo` aceito por
+   * `safeReturnTo`: a navegacao nao troca o host pelo qual o navegador chegou.
+   * Destino de outra origem fica absoluto.
+   */
+  private forNavigation(url: URL): string {
+    return url.origin === this.ownOrigin
+      ? `${url.pathname}${url.search}${url.hash}`
+      : url.toString();
   }
 
   /**
@@ -196,6 +331,11 @@ export class SsoOAuthService {
    *
    * Aceita caminho relativo comecando com uma barra so, ou URL absoluta da
    * propria origem. Qualquer outra coisa cai no destino padrao.
+   *
+   * O caminho tambem passa pelo parser de URL, e nao so pelo teste de texto:
+   * e o parser que o navegador usa no documento do bounce, e ele descarta tab
+   * e quebra de linha antes de ler. `/<tab>/host` passava pelo texto e chegava
+   * ao navegador como `//host`, outro site.
    */
   safeReturnTo(candidate?: string): string {
     if (!candidate) return this.postLoginRedirect;
@@ -203,10 +343,12 @@ export class SsoOAuthService {
     // `//host` e `/\host` sao protocolo-relativos: o navegador sai do site.
     if (/^\/[/\\]/.test(candidate)) return this.postLoginRedirect;
 
-    if (candidate.startsWith('/')) return candidate;
-
     try {
-      return new URL(candidate).origin === this.ownOrigin
+      const destino = candidate.startsWith('/')
+        ? new URL(candidate, this.ownOrigin)
+        : new URL(candidate);
+
+      return destino.origin === this.ownOrigin
         ? candidate
         : this.postLoginRedirect;
     } catch {
@@ -228,9 +370,13 @@ export class SsoOAuthService {
    *
    * Sem JavaScript de proposito: `meta refresh` basta, e o modulo nao impoe
    * politica de CSP a quem usa a biblioteca. O link existe para o caso raro de
-   * o refresh estar desabilitado.
+   * o refresh estar desabilitado, e e so nesse caso que o `aviso` aparece.
    */
-  private bounceTo(res: Response, destino: string): void {
+  private bounceTo(
+    res: Response,
+    destino: string,
+    aviso = 'Entrando...',
+  ): void {
     const escapado = destino.replace(
       /[&<>"']/g,
       (c) =>
@@ -252,8 +398,8 @@ export class SsoOAuthService {
           '<!doctype html>',
           '<html lang="pt-br"><head><meta charset="utf-8">',
           `<meta http-equiv="refresh" content="0; url=${escapado}">`,
-          '<title>Entrando...</title></head>',
-          `<body><p>Entrando... <a href="${escapado}">continuar</a></p></body></html>`,
+          `<title>${aviso}</title></head>`,
+          `<body><p>${aviso} <a href="${escapado}">continuar</a></p></body></html>`,
         ].join(''),
       );
   }

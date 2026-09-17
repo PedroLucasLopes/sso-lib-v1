@@ -21,6 +21,7 @@ const SAME_SITE_VALUES = ['lax', 'strict', 'none'];
  * | `APP_PRIVATE_KEY_FILE`, `APP_PRIVATE_KEY_BASE64` ou `APP_PRIVATE_KEY` | uma delas | `clientPrivateKeyPem` |
  * | `SSO_INTERNAL_URL` | nao | `internalBaseUrl` |
  * | `APP_POST_LOGIN_REDIRECT` | nao | `postLoginRedirect` |
+ * | `APP_LOGIN_ERROR_REDIRECT` | nao | `loginErrorRedirect`; caminho ou URL http(s) |
  * | `APP_COOKIE_PREFIX` | nao | `cookiePrefix` |
  * | `APP_ROUTE_PREFIX` | nao | `routePrefix` |
  * | `APP_SESSION_MAX_AGE` | nao | `sessionMaxAgeSeconds` |
@@ -100,6 +101,14 @@ export function ssoClientOptionsFromEnv(
     problems.push('APP_SESSION_MAX_AGE precisa ser um numero inteiro de segundos');
   }
 
+  const loginErrorRedirect = read('APP_LOGIN_ERROR_REDIRECT');
+
+  if (loginErrorRedirect !== undefined && !isRedirectTarget(loginErrorRedirect)) {
+    problems.push(
+      'APP_LOGIN_ERROR_REDIRECT invalida: use um caminho, como /sign-in-error, ou uma URL http(s)',
+    );
+  }
+
   if (problems.length > 0) {
     throw new Error(
       `@pedrolucaslopes/sso-client: configuracao incompleta\n${problems
@@ -120,6 +129,7 @@ export function ssoClientOptionsFromEnv(
     cookieSecret,
     internalBaseUrl: read('SSO_INTERNAL_URL'),
     postLoginRedirect: read('APP_POST_LOGIN_REDIRECT'),
+    loginErrorRedirect,
     cookiePrefix: read('APP_COOKIE_PREFIX'),
     routePrefix: read('APP_ROUTE_PREFIX'),
     // Seguro por padrao: so `false` explicito desliga, e so faz sentido em
@@ -129,4 +139,18 @@ export function ssoClientOptionsFromEnv(
     sessionMaxAgeSeconds,
     ...explicit,
   };
+}
+
+/**
+ * Caminho desta origem ou URL http(s). `//host` e `/\host` ficam de fora: o
+ * navegador os le como outro site, e um erro de digitacao viraria destino.
+ */
+function isRedirectTarget(value: string): boolean {
+  if (value.startsWith('/')) return !/^\/[/\\]/.test(value);
+
+  try {
+    return ['http:', 'https:'].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
 }

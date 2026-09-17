@@ -62,6 +62,7 @@ Nada no `main.ts`: o módulo registra o `cookie-parser` sozinho.
 | `SSO_INTERNAL_URL` | não | endereço de rede do SSO, quando diferente do issuer. Ex.: `http://host.docker.internal:8080/sso`, de dentro de um container |
 | `APP_COOKIE_PREFIX` | não | prefixo dos cookies. Único entre aplicações que dividam host |
 | `APP_POST_LOGIN_REDIRECT` | não | destino depois do login, quando não há `returnTo` |
+| `APP_LOGIN_ERROR_REDIRECT` | não | tela **pública** do front para onde o callback devolve a pessoa quando o login falha, com `?auth_error=<código>`. Sem ela, o callback responde JSON |
 | `APP_SESSION_MAX_AGE` | não | vida do cookie de sessão, em segundos. Acompanha o refresh token do SSO |
 | `APP_ROUTE_PREFIX` | não | prefixo removido antes de casar com as permissões. Padrão: o caminho de `APP_BASE_URL` |
 | `COOKIE_SECURE` | não | `false` só em desenvolvimento sobre HTTP |
@@ -95,6 +96,15 @@ if (res.status === 401) {
   if (error === 'login_required') location.assign(login_url);
 }
 ```
+
+Login que não se completa, como uma conta sem papel no projeto, volta ao front quando a API define
+`APP_LOGIN_ERROR_REDIRECT`: a pessoa chega a essa tela com `?auth_error=<código>` e, quando se sabe para
+onde ela ia, `&returnTo=<caminho>`. Os códigos são `access_denied`, `login_expired`, `state_mismatch`,
+`sso_unavailable` e `login_failed`. Qualquer outro valor é tratado como falha genérica, e nenhum texto da
+URL vai para a tela.
+
+A tela precisa ficar **fora do guard de sessão** do front. Se ela mandar ao login antes de ler
+`auth_error`, o SSO recusa de novo e a pessoa entra num laço sem clique nenhum.
 
 ## Configuração em código
 

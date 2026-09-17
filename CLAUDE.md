@@ -69,7 +69,7 @@ Ao ser importado, ele registra quatro rotas e um guard global:
 | Rota | Nível | O que faz |
 |---|---|---|
 | `GET /auth/login` | `@SsoLogin()` | gera PKCE, grava a transação em cookie, redireciona ao SSO |
-| `GET /auth/callback` | `@SsoLogin()` | valida `state` e `iss`, troca o code, cria a sessão, devolve o bounce |
+| `GET /auth/callback` | `@SsoLogin()` | valida `state` e `iss`, troca o code, cria a sessão, devolve o bounce. Na falha, devolve ao front com `auth_error` |
 | `GET /auth/token` | `@SsoAuthenticated()` | **entrega o access token**, renovando se preciso |
 | `POST /auth/logout` | `@SsoAuthenticated()` | revoga no SSO (RFC 7009) e limpa o cookie |
 | `GET /auth/me` | `@SsoAuthenticated()` | identidade, permissões e **token anti-CSRF** do usuário corrente |
@@ -260,6 +260,69 @@ começar.
 
 **Não troque o `bounceTo` por um `res.redirect()`.** Parece simplificação e é a regressão do laço.
 
+### 🚧 Login recusado volta ao front com um código
+
+O callback nem sempre consegue criar a sessão, e o caso mais comum não é ataque nem defeito: a conta
+existe no SSO, mas não tem papel no projeto, e o SSO devolve `access_denied`. Um JSON cru em
+`/auth/callback` não explica isso a ninguém, e o front nunca fica sabendo, porque a pessoa não volta
+para ele.
+
+Com `loginErrorRedirect` (`APP_LOGIN_ERROR_REDIRECT`), ela volta:
+
+| Quem chegou ao callback com falha | Resposta |
+|---|---|
+| Navegação de página, com a opção | o documento do bounce, para `<destino>?auth_error=<código>&returnTo=<caminho>` |
+| Chamada de API, ou aplicação sem a opção | `401` com `{ error: <código>, error_description }`, e `502` para `sso_unavailable` |
+
+O critério de navegação é o mesmo `isPageNavigation` do `login_required`, e a volta é documento, não
+`302`, pela mesma razão do login bem-sucedido.
+
+| Código | Quando |
+|---|---|
+| `access_denied` | o SSO respondeu `access_denied`: a conta não tem papel no projeto |
+| `login_expired` | não chegou transação legível, ou ela tem mais de 5 minutos |
+| `state_mismatch` | `state` ausente ou de outra transação, como num login aberto em outra aba |
+| `sso_unavailable` | o SSO respondeu `server_error` ou `temporarily_unavailable`, ou a troca do code deu 5xx, falha de rede ou de discovery |
+| `login_failed` | o resto: outro erro do SSO, `iss` de outro servidor, resposta sem `code`, troca recusada com 4xx (`invalid_grant`, `invalid_client`) |
+
+**A lista é fechada, e na URL só vai o código.** O `error_description` e o `iss` que chegaram pela URL
+vão para o log, escapados com `JSON.stringify`, nunca para a resposta. É a regra da tela de login do
+IdP: texto livre lido da URL e repetido por um domínio confiável é mural para phishing. O front traduz
+os cinco e trata qualquer outro como falha genérica, o que também deixa um código novo chegar sem
+quebrar front antigo.
+
+**`returnTo` só vai quando a resposta é da transação**, depois de o `state` conferir. Sai de
+`safeReturnTo` e, sendo desta origem, vai como caminho, então o "tentar de novo" do front volta à tela
+que a pessoa tinha pedido. Sem transação, ou com `state` de outra, não há destino confiável, e o parâmetro não vai.
+
+**A ordem das checagens é de segurança:** transação, `state`, idade, `iss`, e só então `error`,
+`code` e a troca. Ler `error` antes do `state` deixaria um link forjado escolher o motivo mostrado a
+quem está no meio de um login, e a RFC 9207 §2.4 proíbe supor que um erro veio do servidor certo sem
+conferir o `iss`.
+
+**Por que a opção não tem padrão.** Mandar a falha para `postLoginRedirect` parece o óbvio e cria um
+laço sem clique nenhum: a home do front exige sessão, o guard dele recebe 401 de `/auth/me` e manda ao
+login, o SSO ainda tem sessão e responde `access_denied` na hora, e o callback devolve para a home. A
+cada volta, uma consulta ao banco do SSO. O destino tem de ser uma tela **fora do guard de sessão** do
+front, que lê `auth_error` antes de pensar em login, e só a aplicação sabe qual é.
+
+**A decisão mora no callback, não num filtro.** É ele que já escreve o documento do sucesso, e não há
+guard no meio para responder duas vezes. Quem não é navegação recebe `SsoLoginFailedException`,
+exportada, com `code` e `reason`.
+
+**O que o front precisa fazer**, numa rota pública:
+
+```js
+const CODIGOS = ['access_denied', 'login_expired', 'state_mismatch', 'sso_unavailable', 'login_failed'];
+const params = new URLSearchParams(location.search);
+const codigo = CODIGOS.includes(params.get('auth_error')) ? params.get('auth_error') : 'login_failed';
+// "tentar de novo" é /auth/login?returnTo=<returnTo>, que passa por safeReturnTo outra vez
+```
+
+`access_denied` não se resolve tentando de novo: enquanto a sessão do SSO for da mesma conta, a
+resposta é a mesma. A tela diz a quem pedir acesso; entrar com outra conta exige encerrar a sessão no
+SSO.
+
 ### 🚪 `returnTo` não é redirect aberto
 
 `returnTo` chega pela query string, então é entrada do atacante. `safeReturnTo` aceita caminho
@@ -267,6 +330,12 @@ relativo com uma barra só, ou URL absoluta da própria origem; qualquer outra c
 padrão. Sem isso, `?returnTo=https://phishing.example` transformaria a rota de login numa máquina
 de encaminhar vítimas partindo de um domínio confiável. Há teste de regressão cobrindo
 `//host`, `/\host` e o truque do `\@`.
+
+**O caminho também passa pelo parser de URL**, e não só pelo teste de texto. O documento do bounce
+entrega o destino ao parser do navegador, que descarta tab e quebra de linha antes de ler:
+`/%09/host` passava pelo texto como caminho e chegava ao navegador como `//host`, outro site. O `302`
+do `/auth/login` não tinha o problema, porque o Express codifica o tab no `Location`, e é por isso que
+o teste de regressão do krloc, que confere por ele, não o pegava.
 
 
 **O guard é global e fecha por padrão.** Rota nova nasce protegida; esquecer o decorator nega o
@@ -322,7 +391,7 @@ src/
 ├─ cookie/                  # AEAD (AES-256-GCM) + cookie cifrado e cookie legível
 ├─ decorator/               # níveis de acesso + @CurrentUser
 ├─ dto/                     # tipos de sessão, claims, metadados do AS
-├─ error/                   # SsoLoginRequiredException + o filtro que a traduz
+├─ error/                   # login_required e login recusado: exceções, filtro, isPageNavigation
 ├─ testing/                 # ponto de entrada @pedrolucaslopes/sso-client/testing
 ├─ guard/                   # SsoRbacGuard
 └─ service/                 # discovery · jwks · client assertion · oauth · sessão
@@ -405,6 +474,7 @@ Lidas por `forRootFromEnv`. **O nome é contrato:** renomear uma delas quebra to
 | `APP_COOKIE_PREFIX` | prefixo dos nomes de cookie (`cookiePrefix`). **Único por aplicação que divida host** |
 | `APP_SESSION_MAX_AGE` | vida do cookie de sessão (`sessionMaxAgeSeconds`). Acompanha o refresh token do SSO |
 | `APP_POST_LOGIN_REDIRECT` · `APP_ROUTE_PREFIX` | destino depois do login e prefixo removido antes do RBAC |
+| `APP_LOGIN_ERROR_REDIRECT` | tela pública do front para onde o callback devolve a pessoa com `auth_error` (`loginErrorRedirect`). Sem ela, JSON. Caminho ou URL http(s) |
 
 `loadPrivateKeyPem` aceita três fontes, nesta ordem de preferência: `file` (secret montado, que não
 aparece em `docker inspect` nem no painel do Cloud Run), `base64` e `pem` literal. PEM tem quebra de
@@ -436,6 +506,14 @@ linha, que sobrevive mal a uma variável de ambiente.
   outra defesa: a RFC 10017 §6.2.3.2 exige alguma.
 - O callback devolve documento, não `302`. Trocar por `res.redirect()` recria o laço de login com
   `SameSite=Strict`.
+- Falha no callback, para navegação de página com `loginErrorRedirect`, volta ao front pelo mesmo
+  documento. Na URL vão só o código de `SsoLoginErrorCode` e o `returnTo` de `safeReturnTo`; texto que
+  veio da URL fica no log.
+- `state` e `iss` são conferidos antes de ler `error`.
+- `loginErrorRedirect` não tem padrão. Dar um, inclusive `postLoginRedirect`, recria o laço de login em
+  front que não trata `auth_error`, e pede versão `major`.
+- Código novo em `SsoLoginErrorCode` é `minor`. Renomear ou tirar um quebra o front que o traduz, e
+  pede `major`.
 - O cookie de transação é sempre `lax`, mesmo quando a sessão é `strict`.
 - Nome de cookie nunca é fixo entre aplicações. Cookie não isola por porta (RFC 6265 §8.5).
 - `returnTo` passa por `safeReturnTo` antes de virar destino. Sempre.

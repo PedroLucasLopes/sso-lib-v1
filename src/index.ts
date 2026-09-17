@@ -11,6 +11,8 @@ export {
 export { SsoRbacGuard } from './guard/ssoRbac.guard';
 export { SsoLoginRequiredException } from './error/loginRequired.exception';
 export { SsoLoginRequiredFilter } from './error/loginRequired.filter';
+export { SsoLoginFailedException } from './error/loginFailed.exception';
+export type { SsoLoginErrorCode } from './error/loginFailed.exception';
 
 export { SsoOAuthService } from './service/ssoOAuth.service';
 export { SsoSessionService } from './service/ssoSession.service';

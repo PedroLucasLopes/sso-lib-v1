@@ -46,8 +46,27 @@ export interface SsoClientOptions {
    */
   cookieSecret: string;
 
-  /** Para onde mandar o usuario depois do login. Default: `${appBaseUrl}/home`. */
+  /** Para onde mandar o usuario depois do login, sem `returnTo`. Default: `/`. */
   postLoginRedirect?: string;
+
+  /**
+   * Tela do front que explica por que o login nao se completou. Sem ela, o
+   * callback recusado responde JSON, como sempre respondeu.
+   *
+   * Com ela, a navegacao de pagina que chega ao callback com falha volta para
+   * ca, pelo mesmo documento do login bem-sucedido, com `?auth_error=<codigo>`
+   * (ver `SsoLoginErrorCode`). Quando a resposta era da transacao deste
+   * navegador, vai tambem `&returnTo=<caminho pedido>`, ja passado por
+   * `safeReturnTo`.
+   *
+   * PRECISA ser tela que nao exige sessao. Se o guard do front mandar ao login
+   * antes de ler `auth_error`, o SSO recusa de novo, o callback devolve para ca
+   * e o ciclo se repete sozinho, sem clique nenhum. E por isso que a opcao nao
+   * tem default.
+   *
+   * Caminho, como `/sign-in-error`, ou URL http(s) absoluta.
+   */
+  loginErrorRedirect?: string;
 
   /**
    * RFC 10017 secao 6.1.3.2: Secure e HttpOnly sao MUST. Deixe `false` apenas

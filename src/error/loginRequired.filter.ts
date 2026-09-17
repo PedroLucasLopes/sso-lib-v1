@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { SsoLoginRequiredException } from './loginRequired.exception';
+import { isPageNavigation } from './pageNavigation';
 
 /**
  * Decide o que fazer quando a sessao acabou.
@@ -38,7 +39,7 @@ export class SsoLoginRequiredFilter
     const req = http.getRequest<Request>();
     const res = http.getResponse<Response>();
 
-    if (this.isPageNavigation(req)) {
+    if (isPageNavigation(req)) {
       this.logger.log(
         `sessao ausente em ${req.method} ${req.originalUrl}: mandando ao login, volta para ${exception.returnTo}`,
       );
@@ -58,20 +59,5 @@ export class SsoLoginRequiredFilter
       // corpo. Mesma origem, entao e legivel sem CORS.
       .set('Location', exception.loginUrl)
       .json(exception.getResponse());
-  }
-
-  /**
-   * `Sec-Fetch-Dest: document` e o sinal confiavel: e header proibido, que
-   * so o navegador escreve. `fetch` de dentro de uma pagina manda `empty`.
-   * O `Accept` e o plano B para cliente que nao manda `Sec-Fetch-*`.
-   */
-  private isPageNavigation(req: Request): boolean {
-    const destino = req.headers['sec-fetch-dest'];
-
-    if (typeof destino === 'string') return destino === 'document';
-
-    const aceita = req.headers.accept ?? '';
-
-    return aceita.includes('text/html');
   }
 }
