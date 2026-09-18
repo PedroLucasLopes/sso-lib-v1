@@ -113,6 +113,18 @@ URL vai para a tela.
 A tela precisa ficar **fora do guard de sessão** do front. Se ela mandar ao login antes de ler
 `auth_error`, o SSO recusa de novo e a pessoa entra num laço sem clique nenhum.
 
+Toda recusa da biblioteca vem com um código no campo `error`, e é por ele que o front reage, nunca
+pela frase em `message`:
+
+| Código | Status | Quando |
+|---|---|---|
+| `login_required` | 401 | sem sessão; vem com `login_url` |
+| `invalid_token` | 401 | `Authorization: Bearer` que não verifica ou foi revogado no SSO |
+| `csrf_token_invalid` | 403 | escrita por cookie sem o `X-CSRF-Token`, ou com ele errado |
+| `origin_not_allowed` | 403 | escrita por cookie vinda de outro site |
+
+Rota que o papel não alcança responde o 404 do roteador, sem código, igual a caminho que não existe.
+
 Para o menu acompanhar uma troca de papel sem recarregar, o front relê `GET /auth/me` de tempos em
 tempos e na volta à aba. Os fronts do ecossistema fazem a cada 30 segundos.
 

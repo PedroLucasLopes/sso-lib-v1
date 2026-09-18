@@ -110,7 +110,11 @@ export class SsoRbacGuard implements CanActivate {
 
       // Bearer ruim e problema de quem enviou: 401 seco, sem mexer na sessao.
       if (bearer) {
-        throw new UnauthorizedException('access token invalido ou expirado');
+        throw new UnauthorizedException({
+          statusCode: 401,
+          error: 'invalid_token',
+          message: 'access token invalido ou expirado',
+        });
       }
 
       /* Veio da sessao. Antes de desistir, gasta o refresh token: o access
@@ -150,7 +154,11 @@ export class SsoRbacGuard implements CanActivate {
       this.logger.warn(`o SSO encerrou o acesso de ${claims.sub}`);
 
       if (bearer) {
-        throw new UnauthorizedException('access token revogado no SSO');
+        throw new UnauthorizedException({
+          statusCode: 401,
+          error: 'invalid_token',
+          message: 'access token revogado no SSO',
+        });
       }
 
       this.sessions.clear(res);
@@ -264,6 +272,10 @@ export class SsoRbacGuard implements CanActivate {
    *   2. `Origin`. Recusado quando PRESENTE e de outro site. Nao e exigido,
    *      para nao quebrar cliente que nao o envia; e barreira extra, nao a
    *      principal.
+   *
+   * As duas recusas saem com codigo no campo `error`, `origin_not_allowed` e
+   * `csrf_token_invalid`, os mesmos do SSO: o front reage ao codigo, e o texto
+   * fica para quem le a resposta crua.
    */
   private assertCsrf(req: Request): void {
     if (SSO_SAFE_METHODS.includes(req.method.toUpperCase())) return;
@@ -275,7 +287,11 @@ export class SsoRbacGuard implements CanActivate {
         `CSRF: Origin ${origin} em ${req.method} ${req.path}, esperado ${this.ownOrigin}`,
       );
 
-      throw new ForbiddenException('origem nao permitida');
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'origin_not_allowed',
+        message: 'origem nao permitida',
+      });
     }
 
     const session = this.sessions.read(req);
@@ -295,12 +311,15 @@ export class SsoRbacGuard implements CanActivate {
         `CSRF: header ${SSO_CSRF_HEADER} ausente ou incorreto em ${req.method} ${req.path}`,
       );
 
-      throw new ForbiddenException(
-        'requisicao autenticada por cookie precisa do header ' +
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'csrf_token_invalid',
+        message:
+          'requisicao autenticada por cookie precisa do header ' +
           SSO_CSRF_HEADER +
           '; leia o valor no cookie app_csrf ou em GET /auth/me, ou entao ' +
           'use Authorization: Bearer',
-      );
+      });
     }
   }
 

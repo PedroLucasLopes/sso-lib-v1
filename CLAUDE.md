@@ -86,7 +86,8 @@ acontece depois da verificação, nunca antes: token que não passou não entra 
 daí existe um caminho só, e nem controller, nem interceptor, nem chamada de saída precisa saber
 como o usuário se identificou.
 
-Bearer inválido devolve 401 mas **não** descarta a sessão: token ruim é problema de quem enviou.
+Bearer inválido devolve 401 com `error: "invalid_token"` (RFC 6750 §3.1) mas **não** descarta a
+sessão: token ruim é problema de quem enviou.
 
 ### ⏳ Enquanto o refresh token viver, ninguém vê tela de login
 
@@ -210,6 +211,11 @@ fetch('/api/equipment', { method: 'POST', headers: { 'X-CSRF-Token': csrf }, bod
 
 O valor sai de `GET /auth/me`, que também devolve `csrfCookieName`, ou do próprio cookie. Quem já pegou o token em `GET /auth/token` e
 manda `Authorization: Bearer` não precisa de nada disso.
+
+**A recusa sai com código.** 403 com `error: "csrf_token_invalid"` quando o header falta ou não
+confere, e `error: "origin_not_allowed"` quando a origem é de outro site: os mesmos códigos do SSO. O
+front reage ao código, por exemplo relendo o token em `GET /auth/me` e repetindo a escrita uma vez. O
+texto em `message` é para quem lê a resposta crua, e mudar a frase não pode quebrar ninguém.
 
 ### 🍪 O nome do cookie leva prefixo por aplicação
 
@@ -549,6 +555,9 @@ linha, que sobrevive mal a uma variável de ambiente.
 - Rota sem decorator nega. Não inverta esse padrão.
 - Rota negada devolve o 404 do roteador, `Cannot <MÉTODO> <URL>`, sem `WWW-Authenticate`. Um 403 ali
   revelaria que a rota existe.
+- As outras recusas do guard saem com código no campo `error`: `login_required`, `invalid_token`,
+  `csrf_token_invalid` e `origin_not_allowed`. Código é contrato com o front: renomear um pede `major`.
+  O 404 de rota negada fica sem código, para continuar igual ao do roteador.
 - Permissão concedida vale sem novo login, e a revogada, em até 60 segundos. Cache sem prazo volta a
   deixar uma revogação valendo até o token renovar.
 - Papel trocado, pessoa tirada do projeto, aplicação suspensa e grant revogado valem em até
