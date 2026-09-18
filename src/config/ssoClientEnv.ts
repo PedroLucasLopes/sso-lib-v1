@@ -25,6 +25,7 @@ const SAME_SITE_VALUES = ['lax', 'strict', 'none'];
  * | `APP_COOKIE_PREFIX` | nao | `cookiePrefix` |
  * | `APP_ROUTE_PREFIX` | nao | `routePrefix` |
  * | `APP_SESSION_MAX_AGE` | nao | `sessionMaxAgeSeconds` |
+ * | `APP_GRANT_CHECK_SECONDS` | nao | `grantCheckSeconds`; `0` pergunta em toda requisicao |
  * | `COOKIE_SECURE` | nao | `cookieSecure`; so `false` desliga |
  * | `COOKIE_SAMESITE` | nao | `cookieSameSite` |
  *
@@ -101,6 +102,19 @@ export function ssoClientOptionsFromEnv(
     problems.push('APP_SESSION_MAX_AGE precisa ser um numero inteiro de segundos');
   }
 
+  const grantCheck = read('APP_GRANT_CHECK_SECONDS');
+  const grantCheckSeconds =
+    grantCheck === undefined ? undefined : Number(grantCheck);
+
+  if (
+    grantCheckSeconds !== undefined &&
+    !(Number.isInteger(grantCheckSeconds) && grantCheckSeconds >= 0)
+  ) {
+    problems.push(
+      'APP_GRANT_CHECK_SECONDS precisa ser um numero inteiro de segundos, 0 ou mais',
+    );
+  }
+
   const loginErrorRedirect = read('APP_LOGIN_ERROR_REDIRECT');
 
   if (loginErrorRedirect !== undefined && !isRedirectTarget(loginErrorRedirect)) {
@@ -137,6 +151,7 @@ export function ssoClientOptionsFromEnv(
     cookieSecure: read('COOKIE_SECURE') !== 'false',
     cookieSameSite: sameSite as SsoClientOptions['cookieSameSite'],
     sessionMaxAgeSeconds,
+    grantCheckSeconds,
     ...explicit,
   };
 }

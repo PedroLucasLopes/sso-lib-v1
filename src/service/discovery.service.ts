@@ -75,6 +75,10 @@ export class SsoDiscoveryService {
       permissions_endpoint: metadata.permissions_endpoint
         ? this.toInternal(metadata.permissions_endpoint)
         : undefined,
+      // RFC 7662. SSO anterior a ele nao anuncia, e a introspeccao desliga.
+      introspection_endpoint: metadata.introspection_endpoint
+        ? this.toInternal(metadata.introspection_endpoint)
+        : undefined,
       // Publico: e a audiencia que o SSO espera na asserção de cliente.
       token_endpoint_public: metadata.token_endpoint,
     };

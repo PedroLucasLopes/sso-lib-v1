@@ -31,6 +31,13 @@ import { SsoDiscoveryService } from './discovery.service';
 import { SsoSessionService } from './ssoSession.service';
 
 /**
+ * Quanto tempo uma renovacao pronta continua servindo a quem chega com o
+ * refresh token antigo. Cobre as requisicoes que ja estavam a caminho quando o
+ * cookie novo saiu. Ver `renew`.
+ */
+const RENEWAL_REUSE_MS = 30_000;
+
+/**
  * Lado cliente do Authorization Code + PKCE.
  *
  * O `state` e o `code_verifier` vivem num cookie cifrado, e nao mais no
@@ -50,6 +57,12 @@ export class SsoOAuthService {
   private readonly appBaseUrl: string;
   private readonly refreshSkewSeconds: number;
   private readonly loginErrorRedirect: URL | null;
+
+  /** Renovacoes em andamento e recem-concluidas, pelo refresh token de origem. */
+  private readonly renewals = new Map<
+    string,
+    { promise: Promise<SsoTokenResponse>; settledAt?: number }
+  >();
 
   constructor(
     @Inject(SSO_CLIENT_OPTIONS) options: SsoClientOptions,
@@ -405,6 +418,57 @@ export class SsoOAuthService {
   }
 
   /**
+   * Uma renovacao por refresh token, por mais requisicoes que peçam juntas.
+   *
+   * O SSO gira o refresh token a cada uso e trata o segundo uso do mesmo como
+   * roubo: derruba a familia inteira e a pessoa volta ao login. Uma tela abre
+   * varias chamadas de uma vez; perto de o token vencer, ou logo depois de o
+   * papel mudar, todas pediriam renovacao com o mesmo refresh token, e a segunda
+   * ja seria "reuso". Aqui elas esperam a mesma resposta.
+   *
+   * O resultado fica guardado por `RENEWAL_REUSE_MS` depois de pronto: uma
+   * requisicao que ja estava a caminho quando o cookie novo saiu chega com o
+   * cookie antigo, e recebe o que ja foi renovado em vez de gastar o refresh
+   * token velho. A deteccao de reuso do SSO continua valendo para tudo o que
+   * nao vem deste processo.
+   */
+  private renew(refreshToken: string): Promise<SsoTokenResponse> {
+    const agora = Date.now();
+
+    for (const [chave, entrada] of this.renewals) {
+      if (entrada.settledAt && agora - entrada.settledAt > RENEWAL_REUSE_MS) {
+        this.renewals.delete(chave);
+      }
+    }
+
+    const existente = this.renewals.get(refreshToken);
+
+    if (existente) return existente.promise;
+
+    const entrada: { promise: Promise<SsoTokenResponse>; settledAt?: number } =
+      {
+        promise: this.requestTokens({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+        }),
+      };
+
+    entrada.promise.then(
+      () => {
+        entrada.settledAt = Date.now();
+      },
+      // Falhou: o proximo pedido tenta de novo, e o SSO decide.
+      () => {
+        this.renewals.delete(refreshToken);
+      },
+    );
+
+    this.renewals.set(refreshToken, entrada);
+
+    return entrada.promise;
+  }
+
+  /**
    * Renova AGORA, sem olhar o relogio.
    *
    * `refreshIfNeeded` decide pela data de expiracao, que e o caso comum. Este
@@ -416,12 +480,10 @@ export class SsoOAuthService {
   async forceRefresh(
     session: SsoSessionData,
     res: Response,
+    options: { clearOnFailure?: boolean } = {},
   ): Promise<SsoSessionData | null> {
     try {
-      const tokens = await this.requestTokens({
-        grant_type: 'refresh_token',
-        refresh_token: session.refreshToken,
-      });
+      const tokens = await this.renew(session.refreshToken);
 
       return this.sessions.write(res, tokens, session.csrfToken);
     } catch (error) {
@@ -429,10 +491,14 @@ export class SsoOAuthService {
         `renovacao forcada recusada pelo SSO: ${error instanceof Error ? error.message : String(error)}`,
       );
 
-      this.sessions.clear(res);
+      // Quem renova porque o papel mudou mantem a sessao numa falha: o SSO pode
+      // so estar lento, e a proxima introspeccao diz se o grant acabou.
+      if (options.clearOnFailure !== false) this.sessions.clear(res);
+
       return null;
     }
   }
+
   async refreshIfNeeded(
     session: SsoSessionData,
     res: Response,
@@ -444,10 +510,7 @@ export class SsoOAuthService {
     }
 
     try {
-      const tokens = await this.requestTokens({
-        grant_type: 'refresh_token',
-        refresh_token: session.refreshToken,
-      });
+      const tokens = await this.renew(session.refreshToken);
 
       // Mantem o token anti-CSRF: o front ja tem uma copia dele, e a
       // renovacao acontece sem ele saber.

@@ -10,6 +10,9 @@ import {
 import type { SsoClientOptions } from '../config/ssoClientOptions';
 import type { SsoSessionData, SsoTokenResponse } from '../dto/ssoSession.dto';
 
+/** Onde a sessao renovada fica presa a requisicao. Ver `SsoSessionService.read`. */
+const RENEWED = Symbol('sso-client:renewed-session');
+
 /**
  * Sessao da aplicacao, materializada num cookie cifrado.
  *
@@ -54,8 +57,26 @@ export class SsoSessionService {
     return this.cookies.name(SSO_CSRF_COOKIE);
   }
 
+  /**
+   * A sessao desta requisicao: a renovada, se o guard renovou durante ela, e so
+   * senao a que veio no cookie.
+   *
+   * O cookie da requisicao nao muda quando a resposta grava um novo. Quem lesse
+   * dele depois de uma renovacao pegaria o refresh token ja gasto, e usa-lo de
+   * novo e reuso para o SSO, que derruba a sessao inteira. `GET /auth/token`
+   * fazia exatamente isso quando o token estava perto de vencer.
+   */
   read(req: Request): SsoSessionData | null {
+    const renovada = (req as Request & { [RENEWED]?: SsoSessionData })[RENEWED];
+
+    if (renovada) return renovada;
+
     return this.cookies.get<SsoSessionData>(req, SSO_SESSION_COOKIE);
+  }
+
+  /** Guarda na requisicao a sessao que acabou de ser renovada. Ver `read`. */
+  remember(req: Request, session: SsoSessionData): void {
+    (req as Request & { [RENEWED]?: SsoSessionData })[RENEWED] = session;
   }
 
   /**

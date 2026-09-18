@@ -13,6 +13,7 @@ import type { Request, Response } from 'express';
 import {
   CurrentUser,
   SsoAuthenticated,
+  SsoFreshGrant,
   SsoLogin,
 } from '../decorator/ssoAccess.decorator';
 import type { SsoMe, SsoUser } from '../dto/ssoSession.dto';
@@ -82,6 +83,8 @@ export class SsoAuthController {
    */
   @Get('token')
   @SsoAuthenticated()
+  // Quem pega o token vai usa-lo como Bearer: ele sai com o papel de agora.
+  @SsoFreshGrant()
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
   @Header('Pragma', 'no-cache')
@@ -102,6 +105,9 @@ export class SsoAuthController {
    */
   @Get('me')
   @SsoAuthenticated()
+  // A tela consulta esta rota justamente para saber o que mudou no SSO: ela
+  // pergunta a cada chamada, sem esperar a janela de `grantCheckSeconds`.
+  @SsoFreshGrant()
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
   me(@Req() req: Request, @CurrentUser() user: SsoUser): SsoMe {

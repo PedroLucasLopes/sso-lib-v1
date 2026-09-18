@@ -14,15 +14,24 @@ import * as crypto from 'node:crypto';
 import {
   SSO_CLIENT_OPTIONS,
   SSO_CSRF_HEADER,
+  SSO_FRESH_GRANT,
   SSO_LEVEL_AUTHENTICATED,
   SSO_LEVEL_LOGIN,
   SSO_LEVEL_PUBLIC,
   SSO_SAFE_METHODS,
 } from '../ssoClient.constant';
 import type { SsoClientOptions } from '../config/ssoClientOptions';
-import type { SsoPermission, SsoUser } from '../dto/ssoSession.dto';
+import type {
+  AccessTokenClaims,
+  SsoPermission,
+  SsoUser,
+} from '../dto/ssoSession.dto';
 import { SsoLoginRequiredException } from '../error/loginRequired.exception';
 import { isPageNavigation } from '../error/pageNavigation';
+import {
+  SsoIntrospectionService,
+  type SsoGrantState,
+} from '../service/introspection.service';
 import { SsoJwksVerifierService } from '../service/jwksVerifier.service';
 import { SsoPermissionsService } from '../service/permissions.service';
 import { SsoOAuthService } from '../service/ssoOAuth.service';
@@ -55,6 +64,7 @@ export class SsoRbacGuard implements CanActivate {
     private oauth: SsoOAuthService,
     private verifier: SsoJwksVerifierService,
     private permissions: SsoPermissionsService,
+    private introspection: SsoIntrospectionService,
   ) {
     this.routePrefix = (
       options.routePrefix ?? new URL(options.appBaseUrl).pathname
@@ -114,12 +124,68 @@ export class SsoRbacGuard implements CanActivate {
         this.loginRequired(req, 'token da sessao nao verifica e a renovacao falhou');
       }
 
+      this.sessions.remember(req, renovada);
+
       try {
         claims = await this.verifier.verify(renovada.accessToken);
         accessToken = renovada.accessToken;
       } catch {
         this.sessions.clear(res);
         this.loginRequired(req, 'nem o token renovado verifica');
+      }
+    }
+
+    /* O token diz o papel de quando foi emitido; o SSO diz o de agora
+     * (introspeccao, RFC 7662). Sem esta pergunta, papel trocado, pessoa tirada
+     * do projeto, aplicacao suspensa e logout so pesavam quando o token
+     * vencesse, em ate 15 minutos. Uma pergunta por token a cada
+     * `grantCheckSeconds`, e a cada chamada nas rotas de "quem sou eu". */
+    const grant = claims.jti
+      ? await this.introspection.check(accessToken, claims.jti, {
+          fresh: this.hasLevel(context, SSO_FRESH_GRANT),
+        })
+      : null;
+
+    if (grant && !grant.active) {
+      this.logger.warn(`o SSO encerrou o acesso de ${claims.sub}`);
+
+      if (bearer) {
+        throw new UnauthorizedException('access token revogado no SSO');
+      }
+
+      this.sessions.clear(res);
+      this.loginRequired(req, 'o SSO encerrou o acesso desta sessao');
+    }
+
+    let roles = claims.roles ?? [];
+    let perm = claims.perm;
+
+    if (grant?.active && grant.roles && this.changed(grant, roles, perm)) {
+      this.logger.log(
+        `papel de ${claims.sub} mudou no SSO: [${roles.join(', ')}] -> [${grant.roles.join(', ')}]`,
+      );
+
+      // O SSO e a fonte de verdade: esta requisicao ja decide pelo papel novo.
+      roles = grant.roles;
+      perm = grant.perm ?? perm;
+
+      /* Pela sessao, pede ja o token novo, que sai do SSO com o papel novo e
+       * vai no cookie desta resposta. Pelo Bearer nao ha como: o refresh token
+       * mora na sessao, e quem mandou o Bearer busca outro em GET /auth/token. */
+      if (!bearer) {
+        const renovado = await this.renewForChange(req, res);
+
+        if (renovado) {
+          accessToken = renovado.accessToken;
+          roles = renovado.claims.roles ?? roles;
+          perm = renovado.claims.perm ?? perm;
+
+          this.introspection.remember(renovado.claims.jti, {
+            active: true,
+            roles,
+            perm,
+          });
+        }
       }
     }
 
@@ -134,11 +200,10 @@ export class SsoRbacGuard implements CanActivate {
       req.headers.authorization = `Bearer ${accessToken}`;
     }
 
-    // O token traz o papel; as rotas que ele libera vem do SSO, cacheadas
-    // pelo hash. Uma busca por papel, nao uma por requisicao.
-    const roles = claims.roles ?? [];
+    // O papel vem do SSO; as rotas que ele libera tambem, cacheadas pelo hash.
+    // Uma busca por papel, nao uma por requisicao.
     const permissions = roles.length
-      ? await this.permissions.forRoles(roles, claims.perm)
+      ? await this.permissions.forRoles(roles, perm)
       : [];
 
     const user: SsoUser = {
@@ -167,7 +232,7 @@ export class SsoRbacGuard implements CanActivate {
     /* Rota nova ou permissao recem-concedida: pergunta de novo ao SSO antes de
      * negar, entao o que se libera no console vale na requisicao seguinte. */
     user.permissions = roles.length
-      ? await this.permissions.forRoles(roles, claims.perm, { revalidate: true })
+      ? await this.permissions.forRoles(roles, perm, { revalidate: true })
       : [];
 
     if (this.isAllowed(user.permissions, path, method)) return true;
@@ -332,7 +397,51 @@ export class SsoRbacGuard implements CanActivate {
       this.loginRequired(req, 'sessao expirada e renovacao recusada pelo SSO');
     }
 
+    // Quem ler a sessao depois, nesta mesma requisicao, ve a renovada.
+    this.sessions.remember(req, session);
+
     return session.accessToken;
+  }
+
+  /** O papel do token difere do que o SSO diz agora, ou o conjunto dele mudou. */
+  private changed(grant: SsoGrantState, roles: string[], perm: string): boolean {
+    const agora = [...(grant.roles ?? [])].sort().join('\n');
+    const noToken = [...roles].sort().join('\n');
+
+    return agora !== noToken || (grant.perm !== undefined && grant.perm !== perm);
+  }
+
+  /**
+   * Renova o token da sessao porque o papel mudou no SSO.
+   *
+   * Falhar aqui nao derruba a sessao: o SSO pode so estar lento. Se o grant
+   * tiver mesmo acabado, a proxima introspeccao responde inativo e ai sim a
+   * sessao cai.
+   */
+  private async renewForChange(
+    req: Request,
+    res: Response,
+  ): Promise<{ accessToken: string; claims: AccessTokenClaims } | null> {
+    const stored = this.sessions.read(req);
+
+    if (!stored) return null;
+
+    const renovada = await this.oauth.forceRefresh(stored, res, {
+      clearOnFailure: false,
+    });
+
+    if (!renovada) return null;
+
+    this.sessions.remember(req, renovada);
+
+    try {
+      return {
+        accessToken: renovada.accessToken,
+        claims: await this.verifier.verify(renovada.accessToken),
+      };
+    } catch {
+      return null;
+    }
   }
 
   private isAllowed(

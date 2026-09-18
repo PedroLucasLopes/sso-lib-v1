@@ -30,6 +30,13 @@ export const SSO_LEVEL_LOGIN = 'sso:login';
 export const SSO_LEVEL_AUTHENTICATED = 'sso:authenticated';
 
 /**
+ * Rota que pergunta ao SSO pelo estado do grant a cada chamada, sem esperar a
+ * janela de `grantCheckSeconds`. E a de "quem sou eu", que a tela consulta
+ * justamente para saber o que mudou.
+ */
+export const SSO_FRESH_GRANT = 'sso:fresh-grant';
+
+/**
  * Cookie LEGIVEL com o token anti-CSRF. Nao e HttpOnly de proposito: o
  * front precisa le-lo para devolve-lo no header. A copia autoritativa vive
  * dentro do cookie de sessao, que e cifrado, entao quem so consegue GRAVAR

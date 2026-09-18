@@ -20,6 +20,7 @@ import { SsoLoginRequiredFilter } from './error/loginRequired.filter';
 import { SsoRbacGuard } from './guard/ssoRbac.guard';
 import { SsoClientAssertionService } from './service/clientAssertion.service';
 import { SsoDiscoveryService } from './service/discovery.service';
+import { SsoIntrospectionService } from './service/introspection.service';
 import { SsoJwksVerifierService } from './service/jwksVerifier.service';
 import { SsoPermissionsService } from './service/permissions.service';
 import { SsoOAuthService } from './service/ssoOAuth.service';
@@ -31,6 +32,7 @@ const services: Provider[] = [
   SsoJwksVerifierService,
   SsoClientAssertionService,
   SsoPermissionsService,
+  SsoIntrospectionService,
   SsoSessionService,
   SsoOAuthService,
 ];

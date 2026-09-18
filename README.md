@@ -67,6 +67,7 @@ Nada no `main.ts`: o módulo registra o `cookie-parser` sozinho.
 | `APP_ROUTE_PREFIX` | não | prefixo removido antes de casar com as permissões. Padrão: o caminho de `APP_BASE_URL` |
 | `COOKIE_SECURE` | não | `false` só em desenvolvimento sobre HTTP |
 | `COOKIE_SAMESITE` | não | `strict` (padrão), `lax` ou `none` |
+| `APP_GRANT_CHECK_SECONDS` | não | de quanto em quanto tempo o guard pergunta ao SSO se o grant de um token vale e qual é o papel de agora. Padrão 30; `0` pergunta em toda requisição |
 
 Configuração incompleta não sobe: a API para no boot e a mensagem lista **tudo** o que falta, pelo nome,
 sem mostrar valor nenhum.
@@ -84,6 +85,12 @@ sem mostrar valor nenhum.
 | _(nenhum)_ | exige sessão **e** permissão. Sem ela, o mesmo 404 de uma rota que não existe |
 | `@CurrentUser()` | injeta a identidade no handler |
 | `@CurrentToken()` | injeta o access token verificado, para repassar adiante |
+| `@SsoFreshGrant()` | pergunta ao SSO em toda chamada, sem esperar a janela. `/auth/me` e `/auth/token` já usam |
+
+O que muda no console do SSO vale na API em até 30 segundos, sem novo login. O guard pergunta ao SSO
+(introspecção, RFC 7662) se o grant do token vale e qual é o papel de agora: papel trocado decide a
+requisição pelo novo e renova o token na mesma resposta; pessoa tirada do projeto, aplicação suspensa
+e logout derrubam a sessão. SSO fora do ar mantém o último estado conhecido.
 
 ## O que o front precisa fazer
 
@@ -105,6 +112,9 @@ URL vai para a tela.
 
 A tela precisa ficar **fora do guard de sessão** do front. Se ela mandar ao login antes de ler
 `auth_error`, o SSO recusa de novo e a pessoa entra num laço sem clique nenhum.
+
+Para o menu acompanhar uma troca de papel sem recarregar, o front relê `GET /auth/me` de tempos em
+tempos e na volta à aba. Os fronts do ecossistema fazem a cada 30 segundos.
 
 ## Configuração em código
 

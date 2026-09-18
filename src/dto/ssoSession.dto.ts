@@ -96,6 +96,8 @@ export interface AuthorizationServerMetadata {
   revocation_endpoint?: string;
   /** Extensao propria do SSO: resolve `roles` em permissoes. */
   permissions_endpoint?: string;
+  /** RFC 7662. Ausente em SSO que ainda nao introspecta: a checagem desliga. */
+  introspection_endpoint?: string;
   jwks_uri: string;
 }
 

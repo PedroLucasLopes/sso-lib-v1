@@ -434,21 +434,69 @@ sem cooldown um token com `kid` aleatório viraria vetor de carga contra o SSO.
 resolve papel em permissões via `POST /oauth/permissions` e guarda o conjunto em memória, pela chave
 papel mais hash `perm` do token. Uma busca por papel, não uma por requisição.
 
-O banco do SSO é a fonte de verdade, e o que muda no console chega à aplicação por dois caminhos:
+O banco do SSO é a fonte de verdade, e o que muda no console chega à aplicação assim:
 
 | Mudança no SSO | Vale na aplicação | Como |
 |---|---|---|
 | permissão concedida, ou rota nova no papel | na requisição seguinte | antes de negar, o guard pergunta de novo ao SSO, no máximo uma vez a cada 5 segundos por papel |
-| permissão revogada | em até 60 segundos | cada conjunto guardado vale 60 segundos, e a requisição seguinte busca de novo |
+| permissão revogada | em até 30 segundos | a introspecção devolve o `perm` novo e o conjunto é buscado de novo; sem ela, os 60 segundos do cache |
+| **papel da pessoa trocado** | em até 30 segundos, com token novo | a introspecção devolve o papel de agora e o guard renova o token na mesma resposta |
+| **pessoa tirada do projeto, aplicação suspensa, logout, grant revogado** | em até 30 segundos | a introspecção responde inativo e a sessão cai |
+| qualquer uma das acima, vista pela tela | na chamada seguinte a `GET /auth/me` | `/auth/me` e `/auth/token` perguntam ao SSO a cada chamada |
 
 Só o hash não bastava. Ele muda dentro do token apenas quando o token é renovado, e isso leva até
-15 minutos: uma revogação feita no console continuava valendo esse tempo todo. **Com o SSO fora do
+15 minutos: uma revogação feita no console continuava valendo esse tempo todo. O papel tinha o mesmo
+problema, e pior: ele está **escrito** no token, e a troca de papel só pesava na renovação seguinte. **Com o SSO fora do
 ar**, o último conjunto conhecido segue valendo até ele voltar. A janela é curta por construção: sem
 o SSO nenhum token se renova, e o access token dura 15 minutos.
 
 **Papel que o SSO não conhece mais**, apagado ou renomeado, não é SSO fora do ar: o
 `POST /oauth/permissions` responde 404 e o conjunto vira vazio. Nada fica liberado até o token renovar
-com o nome novo, em até 15 minutos.
+com o nome novo, o que a introspecção antecipa para a janela seguinte.
+
+### 🔎 Introspecção: o SSO diz o papel de agora (RFC 7662)
+
+O access token é assinado e conferido sem consulta, e é isso que dispensa o RP de falar com o SSO a
+cada requisição. O preço era que ele continuava valendo depois de o SSO mudar de ideia sobre ele. O
+`SsoIntrospectionService` pergunta ao `introspection_endpoint` do SSO se o grant do token ainda vale e
+qual é o papel **agora**, lido do banco:
+
+| Resposta | O guard faz |
+|---|---|
+| inativo | derruba a sessão e manda ao login; com Bearer, 401 |
+| ativo, papel ou `perm` diferente do token | decide a requisição pelo papel de agora e, pela sessão, **renova o token na mesma resposta** |
+| ativo, igual ao token | segue |
+
+- **Uma pergunta por token a cada `grantCheckSeconds`** (padrão 30, `APP_GRANT_CHECK_SECONDS`). Sessão
+  parada não custa nada. A RFC 7662 §4 chama essa guarda de janela em que um token revogado ainda
+  parece válido: é ela que fica em 30 segundos, e não nos 15 minutos da vida do token.
+- **`GET /auth/me` e `GET /auth/token` perguntam sempre** (`@SsoFreshGrant()`). É por `/auth/me` que
+  a tela descobre o que mudou, e quem pega o token para usar como Bearer tem de recebê-lo com o papel
+  de agora. Rota sensível da aplicação pode usar o mesmo decorator.
+- **Bearer não renova.** O refresh token mora na sessão. Quem usa Bearer decide pelo papel de agora
+  durante a janela e busca outro token em `GET /auth/token`.
+- **Quando não dá para perguntar, vale o token**, que é o comportamento de antes: SSO que ainda não
+  anuncia `introspection_endpoint` desliga a checagem; SSO fora do ar ou limitando requisições mantém o
+  último estado conhecido. **A exceção é o 401**: o SSO só recusa autenticar a aplicação quando ela foi
+  suspensa ou a chave dela foi revogada, e aí nenhuma sessão dela vale.
+- **Revogação que antes era cosmética passa a valer.** Logout e revogação derrubam a família de
+  refresh tokens; a introspecção responde inativo para o grant sem refresh token vivo, então uma cópia
+  do cookie guardada antes do logout deixa de abrir a API em até 30 segundos. A RFC 7009 §2.1 pedia
+  isso; agora acontece.
+
+### 🔁 Renovar duas vezes com o mesmo refresh token derrubava a sessão
+
+O SSO gira o refresh token a cada uso e trata o segundo uso do mesmo como roubo: revoga a família e a
+pessoa volta ao login. Dois caminhos faziam a própria biblioteca cair nisso, e os dois estão fechados:
+
+- **`GET /auth/token` renovava duas vezes.** O guard renovava o token perto de vencer, e o controller
+  relia a sessão do cookie da **requisição**, que ainda era o antigo, e renovava de novo com o refresh
+  token já gasto. Agora o guard prende a sessão renovada na requisição (`sessions.remember`), e
+  `sessions.read` devolve essa antes do cookie.
+- **Chamadas em paralelo renovavam juntas.** Uma tela abre várias chamadas de uma vez; perto de o token
+  vencer, ou logo depois de uma troca de papel, todas pediam renovação com o mesmo refresh token. Agora
+  `renew` faz uma renovação por refresh token, e o resultado serve por 30 segundos a quem ainda chega
+  com o cookie antigo. Com mais de uma instância, cada uma tem o seu mapa: o caso é raro, mas existe.
 
 Isso não é otimização, é correção. A versão anterior embutia as permissões no token, que crescia
 com o número de rotas. Com 38 rotas o cookie de sessão passou de 4266 bytes e **o navegador o
@@ -475,6 +523,7 @@ Lidas por `forRootFromEnv`. **O nome é contrato:** renomear uma delas quebra to
 | `APP_SESSION_MAX_AGE` | vida do cookie de sessão (`sessionMaxAgeSeconds`). Acompanha o refresh token do SSO |
 | `APP_POST_LOGIN_REDIRECT` · `APP_ROUTE_PREFIX` | destino depois do login e prefixo removido antes do RBAC |
 | `APP_LOGIN_ERROR_REDIRECT` | tela pública do front para onde o callback devolve a pessoa com `auth_error` (`loginErrorRedirect`). Sem ela, JSON. Caminho ou URL http(s) |
+| `APP_GRANT_CHECK_SECONDS` | janela da introspecção (`grantCheckSeconds`): de quanto em quanto tempo o guard pergunta ao SSO se o grant de um token vale. Padrão 30; `0` pergunta em toda requisição |
 
 `loadPrivateKeyPem` aceita três fontes, nesta ordem de preferência: `file` (secret montado, que não
 aparece em `docker inspect` nem no painel do Cloud Run), `base64` e `pem` literal. PEM tem quebra de
@@ -502,6 +551,14 @@ linha, que sobrevive mal a uma variável de ambiente.
   revelaria que a rota existe.
 - Permissão concedida vale sem novo login, e a revogada, em até 60 segundos. Cache sem prazo volta a
   deixar uma revogação valendo até o token renovar.
+- Papel trocado, pessoa tirada do projeto, aplicação suspensa e grant revogado valem em até
+  `grantCheckSeconds`. A introspecção decide pelo papel de agora e, pela sessão, renova o token na hora;
+  inativo derruba a sessão. SSO sem `introspection_endpoint` desliga a checagem, e SSO fora do ar
+  mantém o último estado: nunca derrube sessão por falta de resposta.
+- `GET /auth/me` e `GET /auth/token` perguntam ao SSO a cada chamada (`@SsoFreshGrant()`).
+- Uma renovação por refresh token (`renew`), e quem lê a sessão depois de renovar lê a renovada
+  (`sessions.remember`). Renovar duas vezes com o mesmo refresh token é reuso para o SSO, e a sessão
+  inteira cai.
 - Escrita autenticada por cookie exige o header `X-CSRF-Token`. Não afrouxe isso sem trocar por
   outra defesa: a RFC 10017 §6.2.3.2 exige alguma.
 - O callback devolve documento, não `302`. Trocar por `res.redirect()` recria o laço de login com

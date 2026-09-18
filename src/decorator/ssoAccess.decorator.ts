@@ -2,6 +2,7 @@ import { SetMetadata, createParamDecorator } from '@nestjs/common';
 import type { ExecutionContext } from '@nestjs/common';
 import type { Request } from 'express';
 import {
+  SSO_FRESH_GRANT,
   SSO_LEVEL_AUTHENTICATED,
   SSO_LEVEL_LOGIN,
   SSO_LEVEL_PUBLIC,
@@ -20,6 +21,14 @@ export const SsoLogin = () => SetMetadata(SSO_LEVEL_LOGIN, true);
  * "quem sou eu" ou logout.
  */
 export const SsoAuthenticated = () => SetMetadata(SSO_LEVEL_AUTHENTICATED, true);
+
+/**
+ * Pergunta ao SSO pelo estado do grant a cada chamada, sem esperar a janela de
+ * `grantCheckSeconds`. Serve a "quem sou eu" e a rota sensivel o bastante para
+ * nao aceitar 30 segundos de atraso numa revogacao. Custa uma chamada ao SSO
+ * por requisicao: use com parcimonia.
+ */
+export const SsoFreshGrant = () => SetMetadata(SSO_FRESH_GRANT, true);
 
 /** Injeta a identidade resolvida pelo guard no handler. */
 export const CurrentUser = createParamDecorator(

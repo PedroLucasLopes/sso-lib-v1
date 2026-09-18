@@ -4,6 +4,7 @@ export {
   SsoPublic,
   SsoLogin,
   SsoAuthenticated,
+  SsoFreshGrant,
   CurrentUser,
   CurrentToken,
 } from './decorator/ssoAccess.decorator';
@@ -18,6 +19,8 @@ export { SsoOAuthService } from './service/ssoOAuth.service';
 export { SsoSessionService } from './service/ssoSession.service';
 export { SsoJwksVerifierService } from './service/jwksVerifier.service';
 export { SsoPermissionsService } from './service/permissions.service';
+export { SsoIntrospectionService } from './service/introspection.service';
+export type { SsoGrantState } from './service/introspection.service';
 export { SsoDiscoveryService } from './service/discovery.service';
 export { SsoClientAssertionService } from './service/clientAssertion.service';
 export { SsoCookieService } from './cookie/cookie.service';

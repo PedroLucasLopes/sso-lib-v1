@@ -122,6 +122,22 @@ export interface SsoClientOptions {
    * Default: 60 segundos.
    */
   refreshSkewSeconds?: number;
+
+  /**
+   * De quanto em quanto tempo o guard pergunta ao SSO se o token de uma sessao
+   * ainda vale e qual e o papel da pessoa agora (introspeccao, RFC 7662).
+   *
+   * E o prazo maximo para uma mudanca feita no SSO chegar a esta aplicacao:
+   * papel trocado, pessoa tirada do projeto, aplicacao suspensa, logout. Sem a
+   * checagem, esse prazo era a vida do access token, 15 minutos.
+   *
+   * Cada sessao ativa custa uma chamada ao SSO por janela; sessao parada nao
+   * custa nada. `GET /auth/me` e `GET /auth/token` perguntam sempre, sem
+   * esperar a janela. `0` pergunta em toda requisicao.
+   *
+   * Default: 30 segundos.
+   */
+  grantCheckSeconds?: number;
 }
 
 export interface SsoClientOptionsFactory {
