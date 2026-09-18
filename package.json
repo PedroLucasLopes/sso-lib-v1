@@ -1,6 +1,6 @@
 {
   "name": "@pedrolucaslopes/sso-client",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Camada de autenticacao OAuth 2.0 + PKCE contra o SSO do rent_dashboard. NestJS module no padrao token-mediating backend (RFC 10017 secao 6.2).",
   "license": "UNLICENSED",
   "repository": {
