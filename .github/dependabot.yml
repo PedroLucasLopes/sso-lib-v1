@@ -1,0 +1,26 @@
+# Atualizacoes automaticas, uma vez por semana, em pull request.
+#
+# As actions do pipeline sao fixadas por commit: sem isto, a versao fixada
+# envelheceria calada, com as correcoes de seguranca de fora.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      producao:
+        dependency-type: production
+        update-types: [minor, patch]
+      desenvolvimento:
+        dependency-type: development
+        update-types: [minor, patch]

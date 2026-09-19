@@ -2,23 +2,30 @@
 #
 # O token e o GITHUB_TOKEN da propria execucao, com `packages: write`. Nenhum
 # token pessoal fica guardado em secret, e nenhum sai daqui para o pacote.
+#
+# Cada action e fixada por commit, e nao por tag, que pode ser movida: este job
+# escreve no registro, e e nele que uma action trocada faria mais estrago.
 name: Publish package
 
 on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: read
-  packages: write
+permissions: {}
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           registry-url: https://npm.pkg.github.com
@@ -36,6 +43,11 @@ jobs:
             echo "A tag $GITHUB_REF_NAME nao bate com a versao $VERSION do package.json" >&2
             exit 1
           fi
+
+      # Versao com dependencia vulneravel ou lint quebrado nao sai.
+      - run: npm audit --omit=dev --audit-level=moderate
+
+      - run: npm run lint:check
 
       # `prepublishOnly` compila antes de empacotar.
       - run: npm publish

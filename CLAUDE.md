@@ -60,6 +60,15 @@ publicada.
 
 **Não introduza dependência de nada fora de `sso-client/src`.** É o que mantém o pacote independente.
 
+### CI
+
+`.github/workflows/ci.yml` roda em pull request e push na `main`: `npm ci`, `npm audit` (produção sem
+aviso nenhum; o resto, sem alto), `lint:check` (o lint sem `--fix`), build e `npm pack --dry-run`, que
+mostra o que o pacote leva. O `publish.yml` repete auditoria e lint antes de publicar. As actions dos dois
+são fixadas por commit, cada job pede só a permissão que usa, e o Dependabot
+(`.github/dependabot.yml`) abre pull request para as actions e o npm toda semana. O teste de verdade da
+biblioteca continua sendo o `test:sso` do `krloc-api-v1`, contra um SSO de pé.
+
 ---
 
 ## 🎁 O que o módulo entrega
