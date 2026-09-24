@@ -30,22 +30,8 @@ import {
 import { SsoDiscoveryService } from './discovery.service';
 import { SsoSessionService } from './ssoSession.service';
 
-/**
- * Quanto tempo uma renovacao pronta continua servindo a quem chega com o
- * refresh token antigo. Cobre as requisicoes que ja estavam a caminho quando o
- * cookie novo saiu. Ver `renew`.
- */
 const RENEWAL_REUSE_MS = 30_000;
 
-/**
- * Lado cliente do Authorization Code + PKCE.
- *
- * O `state` e o `code_verifier` vivem num cookie cifrado, e nao mais no
- * Redis. Isso amarra a transacao AO NAVEGADOR, que e o que a RFC 9700 secao
- * 2.1 exige. Com o estado so no Redis, um atacante podia iniciar o proprio
- * login, pegar um par code/state valido e entregar a URL de callback para a
- * vitima, fixando nela a sessao dele.
- */
 @Injectable()
 export class SsoOAuthService {
   private readonly logger = new Logger(SsoOAuthService.name);
@@ -58,7 +44,6 @@ export class SsoOAuthService {
   private readonly refreshSkewSeconds: number;
   private readonly loginErrorRedirect: URL | null;
 
-  /** Renovacoes em andamento e recem-concluidas, pelo refresh token de origem. */
   private readonly renewals = new Map<
     string,
     { promise: Promise<SsoTokenResponse>; settledAt?: number }
@@ -76,22 +61,16 @@ export class SsoOAuthService {
     this.issuer = options.issuer.replace(/\/+$/, '');
     this.clientId = options.clientId;
     this.redirectUri = `${appBaseUrl}/auth/callback`;
-    // Raiz da origem, nao `${appBaseUrl}/home`: com o front proxiando a API,
-    // a raiz e a home do FRONT, que e onde a pessoa espera cair. Uma rota de
-    // API como destino de login so faz sentido sem front.
     this.postLoginRedirect = options.postLoginRedirect ?? '/';
     this.ownOrigin = new URL(appBaseUrl).origin;
     this.appBaseUrl = appBaseUrl;
     this.refreshSkewSeconds = options.refreshSkewSeconds ?? 60;
-    // Montado agora, e nao no primeiro login recusado: endereco que nao monta
-    // derruba o boot, e nao a volta de alguem.
     this.loginErrorRedirect = options.loginErrorRedirect
       ? new URL(options.loginErrorRedirect, this.ownOrigin)
       : null;
   }
 
   async beginLogin(res: Response, returnTo?: string): Promise<void> {
-    // RFC 7636 secao 7.1: no minimo 256 bits de entropia no verifier.
     const codeVerifier = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto
       .createHash('sha256')
@@ -107,8 +86,6 @@ export class SsoOAuthService {
       returnTo,
     };
 
-    // Sempre `lax`: o retorno do SSO pode ser cross-site, e `strict` nao
-    // acompanharia o salto, deixando o callback sem transacao.
     this.cookies.set(res, SSO_TX_COOKIE, transaction, TX_COOKIE_TTL_SECONDS, {
       sameSite: 'lax',
     });
@@ -128,18 +105,6 @@ export class SsoOAuthService {
     res.redirect(url.toString());
   }
 
-  /**
-   * Volta do SSO: confere a resposta, troca o code e cria a sessao.
-   *
-   * A ordem das checagens e de seguranca, nao de estilo. O `state` vem antes
-   * de `error`: so uma resposta DESTA transacao diz alguma coisa sobre ela, e
-   * sem isso um link forjado para o callback escolheria o motivo mostrado a
-   * quem estivesse no meio de um login. O `iss` tambem vem antes: a RFC 9207
-   * secao 2.4 proibe supor que um erro veio do servidor certo sem conferir.
-   *
-   * Toda falha passa por `loginFailed`, que decide entre devolver a pessoa ao
-   * front e responder JSON.
-   */
   async completeLogin(
     req: Request,
     res: Response,
@@ -170,8 +135,6 @@ export class SsoOAuthService {
       );
     }
 
-    // Daqui em diante a resposta e desta transacao, e a volta ao front pode
-    // levar o destino que a pessoa tinha pedido.
     const returnTo = this.safeReturnTo(transaction.returnTo);
     const age = Math.floor(Date.now() / 1000) - transaction.createdAt;
 
@@ -185,8 +148,6 @@ export class SsoOAuthService {
       );
     }
 
-    // RFC 9207: confere quem respondeu. E a defesa contra mix-up recomendada
-    // pela RFC 9700 secao 2.1 para quem fala com mais de um servidor.
     if (typeof query.iss === 'string' && query.iss !== this.issuer) {
       return this.loginFailed(
         req,
@@ -197,9 +158,6 @@ export class SsoOAuthService {
       );
     }
 
-    // O SSO pode devolver um erro em vez de um code (RFC 6749 secao 4.1.2.1).
-    // O texto dele vem pela URL: vai para o log, escapado, e nunca para a
-    // resposta.
     if (typeof query.error === 'string') {
       return this.loginFailed(
         req,
@@ -230,8 +188,6 @@ export class SsoOAuthService {
         redirect_uri: this.redirectUri,
       });
     } catch (error) {
-      // 4xx e o SSO recusando este code ou esta aplicacao. O resto, 5xx,
-      // discovery ou rede, e o SSO que nao respondeu como devia.
       return this.loginFailed(
         req,
         res,
@@ -248,18 +204,6 @@ export class SsoOAuthService {
     this.bounceTo(res, returnTo);
   }
 
-  /**
-   * O login nao se completou.
-   *
-   * Uma pessoa volta ao front, na tela de `loginErrorRedirect`, com um codigo
-   * que ele sabe explicar. A volta e o mesmo documento do login bem-sucedido, e
-   * nao um 302: a cadeia tambem comecou em outro site. Chamada que nao e
-   * navegacao de pagina, ou aplicacao sem a opcao, recebe o JSON de
-   * `SsoLoginFailedException`.
-   *
-   * Na URL vai so o codigo, de uma lista fechada, e o `returnTo`, quando a
-   * resposta era da transacao. O motivo detalhado fica no log.
-   */
   private loginFailed(
     req: Request,
     res: Response,
@@ -273,27 +217,20 @@ export class SsoOAuthService {
       throw new SsoLoginFailedException(code, reason);
     }
 
-    const destino = new URL(this.loginErrorRedirect);
+    const destination = new URL(this.loginErrorRedirect);
 
-    destino.searchParams.set('auth_error', code);
+    destination.searchParams.set('auth_error', code);
 
     if (returnTo) {
-      destino.searchParams.set(
+      destination.searchParams.set(
         'returnTo',
         this.forNavigation(new URL(returnTo, this.ownOrigin)),
       );
     }
 
-    this.bounceTo(res, this.forNavigation(destino), 'Redirecionando...');
+    this.bounceTo(res, this.forNavigation(destination), 'Redirecionando...');
   }
 
-  /**
-   * Codigo do front para o erro que o SSO devolveu (RFC 6749 secao 4.1.2.1).
-   *
-   * `access_denied` e o unico que diz algo sobre a PESSOA: a conta nao tem
-   * papel no projeto. `server_error` e `temporarily_unavailable` sao o SSO
-   * falhando. O resto e pedido mal formado, que a pessoa nao tem como resolver.
-   */
   private codeForAuthorizeError(error: string): SsoLoginErrorCode {
     if (error === 'access_denied') return 'access_denied';
 
@@ -304,64 +241,29 @@ export class SsoOAuthService {
     return 'login_failed';
   }
 
-  /**
-   * Destino desta origem vira caminho, como o `returnTo` aceito por
-   * `safeReturnTo`: a navegacao nao troca o host pelo qual o navegador chegou.
-   * Destino de outra origem fica absoluto.
-   */
   private forNavigation(url: URL): string {
     return url.origin === this.ownOrigin
       ? `${url.pathname}${url.search}${url.hash}`
       : url.toString();
   }
 
-  /**
-   * Renova o access token quando ele esta perto de expirar.
-   *
-   * Devolve null quando a renovacao falha, o que inclui o caso em que o SSO
-   * detectou reuso de refresh token e derrubou a familia. Nesse caso a sessao
-   * tem de ser descartada e o usuario mandado de volta ao login.
-   */
-  /**
-   * Endereco absoluto do login, ja com o destino de volta embutido.
-   *
-   * Absoluto, e nao relativo, porque este valor tambem viaja no corpo de um
-   * 401 para o front decidir o que fazer. Relativo so funcionaria se quem
-   * recebesse estivesse na mesma base, e o front pode nao estar.
-   */
   loginUrl(returnTo?: string): string {
-    const destino = this.safeReturnTo(returnTo);
+    const destination = this.safeReturnTo(returnTo);
 
-    return `${this.appBaseUrl}/auth/login?returnTo=${encodeURIComponent(destino)}`;
+    return `${this.appBaseUrl}/auth/login?returnTo=${encodeURIComponent(destination)}`;
   }
 
-  /**
-   * Para onde mandar o usuario depois do login, sem virar redirect aberto.
-   *
-   * `returnTo` chega pela query string, entao e entrada do atacante. Sem
-   * filtro, `?returnTo=https://phishing.example` transformaria a rota de login
-   * numa maquina de encaminhar vitimas partindo de um dominio confiavel.
-   *
-   * Aceita caminho relativo comecando com uma barra so, ou URL absoluta da
-   * propria origem. Qualquer outra coisa cai no destino padrao.
-   *
-   * O caminho tambem passa pelo parser de URL, e nao so pelo teste de texto:
-   * e o parser que o navegador usa no documento do bounce, e ele descarta tab
-   * e quebra de linha antes de ler. `/<tab>/host` passava pelo texto e chegava
-   * ao navegador como `//host`, outro site.
-   */
   safeReturnTo(candidate?: string): string {
     if (!candidate) return this.postLoginRedirect;
 
-    // `//host` e `/\host` sao protocolo-relativos: o navegador sai do site.
     if (/^\/[/\\]/.test(candidate)) return this.postLoginRedirect;
 
     try {
-      const destino = candidate.startsWith('/')
+      const destination = candidate.startsWith('/')
         ? new URL(candidate, this.ownOrigin)
         : new URL(candidate);
 
-      return destino.origin === this.ownOrigin
+      return destination.origin === this.ownOrigin
         ? candidate
         : this.postLoginRedirect;
     } catch {
@@ -369,28 +271,12 @@ export class SsoOAuthService {
     }
   }
 
-  /**
-   * Ultima etapa do login: em vez de um 302, devolve um documento da PROPRIA
-   * origem que navega sozinho para o destino.
-   *
-   * Parece rodeio, e e o que permite `SameSite=Strict` na sessao. O retorno do
-   * provedor federado e uma cadeia de redirects que comeca em outro site, e o
-   * navegador considera a cadeia inteira cross-site. Um cookie `Strict` nao
-   * acompanha esse salto: a pagina de destino chegaria sem sessao, devolveria
-   * 401, mandaria o usuario para o login de novo e o ciclo recomecaria.
-   *
-   * Uma navegacao iniciada por ESTE documento e same-site, e aí o cookie vai.
-   *
-   * Sem JavaScript de proposito: `meta refresh` basta, e o modulo nao impoe
-   * politica de CSP a quem usa a biblioteca. O link existe para o caso raro de
-   * o refresh estar desabilitado, e e so nesse caso que o `aviso` aparece.
-   */
   private bounceTo(
     res: Response,
-    destino: string,
-    aviso = 'Entrando...',
+    destination: string,
+    warning = 'Entrando...',
   ): void {
-    const escapado = destino.replace(
+    const escaped = destination.replace(
       /[&<>"']/g,
       (c) =>
         ({
@@ -410,42 +296,27 @@ export class SsoOAuthService {
         [
           '<!doctype html>',
           '<html lang="pt-br"><head><meta charset="utf-8">',
-          `<meta http-equiv="refresh" content="0; url=${escapado}">`,
-          `<title>${aviso}</title></head>`,
-          `<body><p>${aviso} <a href="${escapado}">continuar</a></p></body></html>`,
+          `<meta http-equiv="refresh" content="0; url=${escaped}">`,
+          `<title>${warning}</title></head>`,
+          `<body><p>${warning} <a href="${escaped}">continuar</a></p></body></html>`,
         ].join(''),
       );
   }
 
-  /**
-   * Uma renovacao por refresh token, por mais requisicoes que peçam juntas.
-   *
-   * O SSO gira o refresh token a cada uso e trata o segundo uso do mesmo como
-   * roubo: derruba a familia inteira e a pessoa volta ao login. Uma tela abre
-   * varias chamadas de uma vez; perto de o token vencer, ou logo depois de o
-   * papel mudar, todas pediriam renovacao com o mesmo refresh token, e a segunda
-   * ja seria "reuso". Aqui elas esperam a mesma resposta.
-   *
-   * O resultado fica guardado por `RENEWAL_REUSE_MS` depois de pronto: uma
-   * requisicao que ja estava a caminho quando o cookie novo saiu chega com o
-   * cookie antigo, e recebe o que ja foi renovado em vez de gastar o refresh
-   * token velho. A deteccao de reuso do SSO continua valendo para tudo o que
-   * nao vem deste processo.
-   */
   private renew(refreshToken: string): Promise<SsoTokenResponse> {
-    const agora = Date.now();
+    const nowMs = Date.now();
 
-    for (const [chave, entrada] of this.renewals) {
-      if (entrada.settledAt && agora - entrada.settledAt > RENEWAL_REUSE_MS) {
-        this.renewals.delete(chave);
+    for (const [key, entry] of this.renewals) {
+      if (entry.settledAt && nowMs - entry.settledAt > RENEWAL_REUSE_MS) {
+        this.renewals.delete(key);
       }
     }
 
-    const existente = this.renewals.get(refreshToken);
+    const existing = this.renewals.get(refreshToken);
 
-    if (existente) return existente.promise;
+    if (existing) return existing.promise;
 
-    const entrada: { promise: Promise<SsoTokenResponse>; settledAt?: number } =
+    const pending: { promise: Promise<SsoTokenResponse>; settledAt?: number } =
       {
         promise: this.requestTokens({
           grant_type: 'refresh_token',
@@ -453,30 +324,20 @@ export class SsoOAuthService {
         }),
       };
 
-    entrada.promise.then(
+    pending.promise.then(
       () => {
-        entrada.settledAt = Date.now();
+        pending.settledAt = Date.now();
       },
-      // Falhou: o proximo pedido tenta de novo, e o SSO decide.
       () => {
         this.renewals.delete(refreshToken);
       },
     );
 
-    this.renewals.set(refreshToken, entrada);
+    this.renewals.set(refreshToken, pending);
 
-    return entrada.promise;
+    return pending.promise;
   }
 
-  /**
-   * Renova AGORA, sem olhar o relogio.
-   *
-   * `refreshIfNeeded` decide pela data de expiracao, que e o caso comum. Este
-   * existe para o outro caso: o access token da sessao nao verificou. Pode ser
-   * rotacao de chave de assinatura no SSO, relogio fora de hora, ou o token
-   * ter sido invalidado. Tentar renovar antes de desistir transforma uma
-   * deslogada geral num soluco que ninguem percebe.
-   */
   async forceRefresh(
     session: SsoSessionData,
     res: Response,
@@ -491,8 +352,6 @@ export class SsoOAuthService {
         `renovacao forcada recusada pelo SSO: ${error instanceof Error ? error.message : String(error)}`,
       );
 
-      // Quem renova porque o papel mudou mantem a sessao numa falha: o SSO pode
-      // so estar lento, e a proxima introspeccao diz se o grant acabou.
       if (options.clearOnFailure !== false) this.sessions.clear(res);
 
       return null;
@@ -512,8 +371,6 @@ export class SsoOAuthService {
     try {
       const tokens = await this.renew(session.refreshToken);
 
-      // Mantem o token anti-CSRF: o front ja tem uma copia dele, e a
-      // renovacao acontece sem ele saber.
       return this.sessions.write(res, tokens, session.csrfToken);
     } catch (error) {
       this.logger.warn(
@@ -525,14 +382,6 @@ export class SsoOAuthService {
     }
   }
 
-  /**
-   * Entrega o access token corrente ao cliente (RFC 10017 secao 6.2).
-   *
-   * Renova antes de entregar, se estiver perto de expirar, para o cliente
-   * nunca receber um token quase morto. O refresh token NAO sai daqui: ele
-   * fica na sessao, do lado do servidor. O cliente segura apenas uma
-   * credencial de minutos, e volta aqui quando ela expira.
-   */
   async currentAccessToken(
     req: Request,
     res: Response,
@@ -559,21 +408,9 @@ export class SsoOAuthService {
     };
   }
 
-  /**
-   * Encerra a sessao local E revoga o refresh token no SSO (RFC 7009).
-   *
-   * A revogacao nao e opcional. Com sessao client-side, limpar o cookie so
-   * apaga a copia do navegador: qualquer outra copia continuaria renovando
-   * indefinidamente. Revogar mata a familia inteira no servidor.
-   *
-   * O access token ja emitido segue valido ate expirar, o que e inerente a
-   * token assinado e sem consulta. Por isso ele dura minutos, nao dias.
-   */
   async logout(req: Request, res: Response): Promise<void> {
     const session = this.sessions.read(req);
 
-    // Limpa os cookies antes de falar com o SSO: se a rede cair, o usuario
-    // ainda sai localmente.
     this.sessions.clear(res);
     this.cookies.clear(res, SSO_TX_COOKIE, { sameSite: 'lax' });
 
@@ -602,8 +439,6 @@ export class SsoOAuthService {
         }),
       });
     } catch (error) {
-      // Logout local ja aconteceu. Falhar aqui piora a seguranca, mas travar
-      // o logout seria pior ainda.
       this.logger.error(
         `falha ao revogar o refresh token no SSO: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -635,7 +470,6 @@ export class SsoOAuthService {
         ? `${body.error}: ${body.error_description ?? ''}`.trim()
         : `HTTP ${res.status}`;
 
-      // 5xx e falha do SSO; 4xx e recusa legitima da credencial.
       throw res.status >= 500
         ? new BadGatewayException(`SSO indisponivel (${detail})`)
         : new UnauthorizedException(`SSO recusou a troca (${detail})`);

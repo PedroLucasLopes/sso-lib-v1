@@ -37,24 +37,12 @@ import { SsoPermissionsService } from '../service/permissions.service';
 import { SsoOAuthService } from '../service/ssoOAuth.service';
 import { SsoSessionService } from '../service/ssoSession.service';
 
-/**
- * Guard unico: sessao, renovacao silenciosa e RBAC por rota.
- *
- * Sobre o casamento de caminho: o caminho da REQUISICAO nunca vira padrao.
- * A versao anterior fazia exatamente isso, montando `new RegExp(req.path)` e
- * testando a permissao contra ela. Alem de inverter a relacao, transformava
- * metacaracteres de regex no caminho em bypass de autorizacao: um pedido a
- * `/api/.*` casava com qualquer permissao. Aqui quem vira padrao e a
- * permissao, que e cadastrada por administrador, e o caminho da requisicao e
- * sempre apenas o texto testado.
- */
 @Injectable()
 export class SsoRbacGuard implements CanActivate {
   private readonly logger = new Logger(SsoRbacGuard.name);
   private readonly routePrefix: string;
   private readonly matchers = new Map<string, RegExp>();
 
-  /** Origem desta aplicacao, para recusar `Origin` de outro site. */
   private readonly ownOrigin: string;
 
   constructor(
@@ -80,21 +68,8 @@ export class SsoRbacGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<Request>();
     const res = context.switchToHttp().getResponse<Response>();
 
-    // Duas formas de apresentar credencial, nesta precedencia:
-    //
-    //   1. Authorization: Bearer  - explicito. E como uma aplicacao cliente
-    //      chama a API depois de pegar o token em GET /auth/token.
-    //   2. cookie de sessao       - implicito. Usado pela navegacao direta,
-    //      e e a unica forma que permite renovacao automatica, porque o
-    //      refresh token so existe do lado do servidor.
-    //
-    // Bearer primeiro porque e explicito, e porque nao carrega o risco de
-    // CSRF que o cookie carrega.
     const bearer = this.readBearer(req);
 
-    // Antes de qualquer coisa que mude estado, inclusive antes da renovacao
-    // silenciosa do token: requisicao forjada nao pode consumir uma rotacao
-    // de refresh token.
     if (!bearer) this.assertCsrf(req);
 
     let accessToken = bearer ?? (await this.fromSession(req, res));
@@ -103,12 +78,11 @@ export class SsoRbacGuard implements CanActivate {
 
     try {
       claims = await this.verifier.verify(accessToken);
-    } catch (primeiroErro) {
+    } catch (firstError) {
       this.logger.warn(
-        `access token recusado: ${primeiroErro instanceof Error ? primeiroErro.message : String(primeiroErro)}`,
+        `access token recusado: ${firstError instanceof Error ? firstError.message : String(firstError)}`,
       );
 
-      // Bearer ruim e problema de quem enviou: 401 seco, sem mexer na sessao.
       if (bearer) {
         throw new UnauthorizedException({
           statusCode: 401,
@@ -117,33 +91,24 @@ export class SsoRbacGuard implements CanActivate {
         });
       }
 
-      /* Veio da sessao. Antes de desistir, gasta o refresh token: o access
-       * token pode ter sido invalidado por rotacao de chave no SSO ou por
-       * relogio fora de hora, e nos dois casos a sessao ainda esta boa. Sem
-       * esta tentativa, uma rotacao de chave deslogaria todo mundo de uma vez. */
       const stored = this.sessions.read(req);
-      const renovada = stored ? await this.oauth.forceRefresh(stored, res) : null;
+      const renewed = stored ? await this.oauth.forceRefresh(stored, res) : null;
 
-      if (!renovada) {
+      if (!renewed) {
         this.loginRequired(req, 'token da sessao nao verifica e a renovacao falhou');
       }
 
-      this.sessions.remember(req, renovada);
+      this.sessions.remember(req, renewed);
 
       try {
-        claims = await this.verifier.verify(renovada.accessToken);
-        accessToken = renovada.accessToken;
+        claims = await this.verifier.verify(renewed.accessToken);
+        accessToken = renewed.accessToken;
       } catch {
         this.sessions.clear(res);
         this.loginRequired(req, 'nem o token renovado verifica');
       }
     }
 
-    /* O token diz o papel de quando foi emitido; o SSO diz o de agora
-     * (introspeccao, RFC 7662). Sem esta pergunta, papel trocado, pessoa tirada
-     * do projeto, aplicacao suspensa e logout so pesavam quando o token
-     * vencesse, em ate 15 minutos. Uma pergunta por token a cada
-     * `grantCheckSeconds`, e a cada chamada nas rotas de "quem sou eu". */
     const grant = claims.jti
       ? await this.introspection.check(accessToken, claims.jti, {
           fresh: this.hasLevel(context, SSO_FRESH_GRANT),
@@ -173,22 +138,18 @@ export class SsoRbacGuard implements CanActivate {
         `papel de ${claims.sub} mudou no SSO: [${roles.join(', ')}] -> [${grant.roles.join(', ')}]`,
       );
 
-      // O SSO e a fonte de verdade: esta requisicao ja decide pelo papel novo.
       roles = grant.roles;
       perm = grant.perm ?? perm;
 
-      /* Pela sessao, pede ja o token novo, que sai do SSO com o papel novo e
-       * vai no cookie desta resposta. Pelo Bearer nao ha como: o refresh token
-       * mora na sessao, e quem mandou o Bearer busca outro em GET /auth/token. */
       if (!bearer) {
-        const renovado = await this.renewForChange(req, res);
+        const renewed = await this.renewForChange(req, res);
 
-        if (renovado) {
-          accessToken = renovado.accessToken;
-          roles = renovado.claims.roles ?? roles;
-          perm = renovado.claims.perm ?? perm;
+        if (renewed) {
+          accessToken = renewed.accessToken;
+          roles = renewed.claims.roles ?? roles;
+          perm = renewed.claims.perm ?? perm;
 
-          this.introspection.remember(renovado.claims.jti, {
+          this.introspection.remember(renewed.claims.jti, {
             active: true,
             roles,
             perm,
@@ -197,19 +158,10 @@ export class SsoRbacGuard implements CanActivate {
       }
     }
 
-    // Reconheceu o login pelo cookie: preenche o header como se o cliente o
-    // tivesse enviado. A partir daqui existe UM caminho so. Controller,
-    // interceptor e qualquer chamada de saida leem `Authorization` sem
-    // precisar saber como o usuario se identificou.
-    //
-    // Escrito depois da verificacao, de proposito: token que nao passou nao
-    // entra no request.
     if (!bearer) {
       req.headers.authorization = `Bearer ${accessToken}`;
     }
 
-    // O papel vem do SSO; as rotas que ele libera tambem, cacheadas pelo hash.
-    // Uma busca por papel, nao uma por requisicao.
     const permissions = roles.length
       ? await this.permissions.forRoles(roles, perm)
       : [];
@@ -237,8 +189,6 @@ export class SsoRbacGuard implements CanActivate {
 
     if (this.isAllowed(user.permissions, path, method)) return true;
 
-    /* Rota nova ou permissao recem-concedida: pergunta de novo ao SSO antes de
-     * negar, entao o que se libera no console vale na requisicao seguinte. */
     user.permissions = roles.length
       ? await this.permissions.forRoles(roles, perm, { revalidate: true })
       : [];
@@ -247,36 +197,9 @@ export class SsoRbacGuard implements CanActivate {
 
     this.logger.warn(`negado: ${roles.join(', ') || 'sem papel'} em ${method} ${path}`);
 
-    /* Sem permissao, ou rota que nao existe no catalogo do SSO: o mesmo 404 de
-     * um caminho que nao existe na aplicacao. Quem nao pode usar a rota nao
-     * descobre que ela existe (RFC 9110 secao 15.5.4). */
     throw new NotFoundException(`Cannot ${req.method} ${req.originalUrl}`);
   }
 
-  /**
-   * Defesa anti-CSRF para as requisicoes autenticadas por COOKIE.
-   *
-   * A RFC 10017 secao 6.2.3.2 exige que o token-mediating backend se defenda
-   * de CSRF, e a razao e mecanica: o navegador anexa o cookie de sessao mesmo
-   * quando quem disparou a requisicao foi outro site. O `Authorization:
-   * Bearer` nao tem esse problema, porque o navegador nunca o anexa sozinho.
-   * Por isso esta checagem so vale quando a credencial veio do cookie.
-   *
-   * Sao duas barreiras:
-   *
-   *   1. Token de dupla submissao. O valor autoritativo vive DENTRO do cookie
-   *      de sessao, que e cifrado, e o front devolve a copia legivel no
-   *      header. Quem consegue apenas GRAVAR cookie no dominio, por subdominio
-   *      tomado ou resposta injetada, nao produz um par que bata, porque nao
-   *      sabe cifrar o lado de dentro.
-   *   2. `Origin`. Recusado quando PRESENTE e de outro site. Nao e exigido,
-   *      para nao quebrar cliente que nao o envia; e barreira extra, nao a
-   *      principal.
-   *
-   * As duas recusas saem com codigo no campo `error`, `origin_not_allowed` e
-   * `csrf_token_invalid`, os mesmos do SSO: o front reage ao codigo, e o texto
-   * fica para quem le a resposta crua.
-   */
   private assertCsrf(req: Request): void {
     if (SSO_SAFE_METHODS.includes(req.method.toUpperCase())) return;
 
@@ -296,17 +219,15 @@ export class SsoRbacGuard implements CanActivate {
 
     const session = this.sessions.read(req);
 
-    // Sem sessao nao ha o que proteger, e o 401 de `fromSession` diagnostica
-    // melhor do que um 403 generico daqui.
     if (!session) return;
 
-    const enviado = req.headers[SSO_CSRF_HEADER];
+    const sent = req.headers[SSO_CSRF_HEADER];
 
-    const confere =
-      typeof enviado === 'string' &&
-      this.sameToken(enviado, session.csrfToken);
+    const checks =
+      typeof sent === 'string' &&
+      this.sameToken(sent, session.csrfToken);
 
-    if (!confere) {
+    if (!checks) {
       this.logger.warn(
         `CSRF: header ${SSO_CSRF_HEADER} ausente ou incorreto em ${req.method} ${req.path}`,
       );
@@ -323,7 +244,6 @@ export class SsoRbacGuard implements CanActivate {
     }
   }
 
-  /** Comparacao em tempo constante: `!==` vaza o tamanho do prefixo certo. */
   private sameToken(a: string, b: string): boolean {
     const left = Buffer.from(a);
     const right = Buffer.from(b);
@@ -331,20 +251,6 @@ export class SsoRbacGuard implements CanActivate {
     return left.length === right.length && crypto.timingSafeEqual(left, right);
   }
 
-  /**
-   * Onde a pessoa estava quando a sessao morreu.
-   *
-   * Duas origens, porque sao dois casos:
-   *
-   *   - **Navegacao de pagina.** `originalUrl` E o lugar: ela pediu aquela URL.
-   *   - **Chamada de API.** `originalUrl` seria `/api/accessory`, uma rota de
-   *     backend, e nao a tela que a pessoa via. O `Referer` de um `fetch`
-   *     same-origin carrega a pagina que disparou a chamada, que e exatamente
-   *     `/accessories`. E o unico lugar onde o backend fica sabendo disso.
-   *
-   * `Referer` e entrada do navegador, nao segredo, entao passa por
-   * `safeReturnTo` como qualquer outro destino.
-   */
   private returnToFor(req: Request): string {
     if (isPageNavigation(req)) return req.originalUrl;
 
@@ -353,18 +259,16 @@ export class SsoRbacGuard implements CanActivate {
     return typeof referer === 'string' ? referer : '';
   }
 
-  /** Sem sessao utilizavel: manda ao login e volta para onde a pessoa estava. */
-  private loginRequired(req: Request, motivo: string): never {
+  private loginRequired(req: Request, reason: string): never {
     const returnTo = this.returnToFor(req);
 
     throw new SsoLoginRequiredException(
       this.oauth.loginUrl(returnTo),
       this.oauth.safeReturnTo(returnTo),
-      motivo,
+      reason,
     );
   }
 
-  /** RFC 6750 secao 2.1: `Authorization: Bearer <token>`. */
   private readBearer(req: Request): string | null {
     const header = req.headers.authorization;
 
@@ -375,31 +279,21 @@ export class SsoRbacGuard implements CanActivate {
     return scheme?.toLowerCase() === 'bearer' && value ? value : null;
   }
 
-  /**
-   * Caminho do cookie. Renova antes de devolver: se o access token acabou de
-   * expirar, quem navega nem percebe. Isso so e possivel aqui porque o
-   * refresh token vive na sessao, do lado do servidor.
-   */
   private async fromSession(req: Request, res: Response): Promise<string> {
     const stored = this.sessions.read(req);
 
     if (!stored) {
-      // Diagnostico: "credencial ausente" tem tres causas muito diferentes e
-      // indistinguiveis de fora. Registrar o que CHEGOU separa as tres:
-      //   . nenhum cookie          -> navegador nao enviou, ou descartou
-      //   . cookie com tamanho ok  -> falha ao decifrar (COOKIE_SECRET mudou)
-      //   . cookie curto demais    -> truncado no caminho
       const jar = (req.cookies ?? {}) as Record<string, string>;
-      const nomes = Object.keys(jar);
-      const esperado = this.sessions.cookieName;
+      const names = Object.keys(jar);
+      const expected = this.sessions.cookieName;
 
       this.logger.warn(
-        nomes.length === 0
+        names.length === 0
           ? `credencial ausente em ${req.method} ${req.path}: nenhum cookie chegou`
           : `credencial ausente em ${req.method} ${req.path}: cookies recebidos [` +
-              nomes.map((n) => `${n}=${jar[n]?.length ?? 0}b`).join(', ') +
-              `]; esperado "${esperado}"` +
-              (jar[esperado]
+              names.map((n) => `${n}=${jar[n]?.length ?? 0}b`).join(', ') +
+              `]; esperado "${expected}"` +
+              (jar[expected]
                 ? ' (presente, mas nao decifrou: COOKIE_SECRET mudou?)'
                 : ' (ausente)'),
       );
@@ -410,33 +304,21 @@ export class SsoRbacGuard implements CanActivate {
     const session = await this.oauth.refreshIfNeeded(stored, res);
 
     if (!session) {
-      // O refresh token morreu: expirou, foi revogado, ou a deteccao de reuso
-      // derrubou a familia. Nao ha como renovar em silencio, so refazendo o
-      // login. Mandar de volta ao lugar de origem e o que torna isso invisivel.
       this.loginRequired(req, 'sessao expirada e renovacao recusada pelo SSO');
     }
 
-    // Quem ler a sessao depois, nesta mesma requisicao, ve a renovada.
     this.sessions.remember(req, session);
 
     return session.accessToken;
   }
 
-  /** O papel do token difere do que o SSO diz agora, ou o conjunto dele mudou. */
   private changed(grant: SsoGrantState, roles: string[], perm: string): boolean {
-    const agora = [...(grant.roles ?? [])].sort().join('\n');
+    const now = [...(grant.roles ?? [])].sort().join('\n');
     const noToken = [...roles].sort().join('\n');
 
-    return agora !== noToken || (grant.perm !== undefined && grant.perm !== perm);
+    return now !== noToken || (grant.perm !== undefined && grant.perm !== perm);
   }
 
-  /**
-   * Renova o token da sessao porque o papel mudou no SSO.
-   *
-   * Falhar aqui nao derruba a sessao: o SSO pode so estar lento. Se o grant
-   * tiver mesmo acabado, a proxima introspeccao responde inativo e ai sim a
-   * sessao cai.
-   */
   private async renewForChange(
     req: Request,
     res: Response,
@@ -445,18 +327,18 @@ export class SsoRbacGuard implements CanActivate {
 
     if (!stored) return null;
 
-    const renovada = await this.oauth.forceRefresh(stored, res, {
+    const renewed = await this.oauth.forceRefresh(stored, res, {
       clearOnFailure: false,
     });
 
-    if (!renovada) return null;
+    if (!renewed) return null;
 
-    this.sessions.remember(req, renovada);
+    this.sessions.remember(req, renewed);
 
     try {
       return {
-        accessToken: renovada.accessToken,
-        claims: await this.verifier.verify(renovada.accessToken),
+        accessToken: renewed.accessToken,
+        claims: await this.verifier.verify(renewed.accessToken),
       };
     } catch {
       return null;
@@ -475,10 +357,6 @@ export class SsoRbacGuard implements CanActivate {
     );
   }
 
-  /**
-   * Compila o caminho da PERMISSAO num matcher.
-   * `:param` casa um segmento; qualquer outro caractere e literal escapado.
-   */
   private compile(permissionPath: string): RegExp {
     const cached = this.matchers.get(permissionPath);
 
@@ -500,25 +378,17 @@ export class SsoRbacGuard implements CanActivate {
     return matcher;
   }
 
-  /**
-   * Tira o prefixo global e a barra final, para que `/api/equipment/` e
-   * `/equipment` cheguem na mesma forma que o SSO guarda.
-   */
   private normalize(path: string): string {
     let normalized = path;
 
-    /* Recorta na FRONTEIRA. Sem o teste do proximo caractere, `/ssouser`
-     * viraria `/user` e um caminho que nao e desta aplicacao casaria com
-     * uma permissao dela. Hoje o roteador do Nest nao deixa chegar aqui,
-     * mas a normalizacao nao deve depender disso. */
-    const prefixo = this.routePrefix;
+    const prefix = this.routePrefix;
 
     if (
-      prefixo &&
-      normalized.startsWith(prefixo) &&
-      (normalized.length === prefixo.length || normalized[prefixo.length] === '/')
+      prefix &&
+      normalized.startsWith(prefix) &&
+      (normalized.length === prefix.length || normalized[prefix.length] === '/')
     ) {
-      normalized = normalized.slice(prefixo.length);
+      normalized = normalized.slice(prefix.length);
     }
 
     normalized = normalized.replace(/\/{2,}/g, '/');

@@ -1,11 +1,5 @@
 import * as crypto from 'node:crypto';
 
-/**
- * AES-256-GCM em codificacao compacta `iv.tag.cipher`, para caber num cookie.
- *
- * GCM cifra e autentica na mesma passada: adulterar o cookie faz a abertura
- * falhar em vez de devolver conteudo corrompido.
- */
 const ALGORITHM = 'aes-256-gcm';
 const IV_BYTES = 12;
 const KEY_BYTES = 32;
@@ -39,11 +33,6 @@ export function sealCompact(key: Buffer, plaintext: string): string {
   ].join('.');
 }
 
-/**
- * Devolve null em vez de lancar: cookie ilegivel e caso esperado (chave
- * rotacionada, cookie truncado, usuario editando o valor), nao erro de
- * servidor. Quem chama trata como "sem sessao".
- */
 export function openCompact(key: Buffer, token: string): string | null {
   const parts = token.split('.');
 

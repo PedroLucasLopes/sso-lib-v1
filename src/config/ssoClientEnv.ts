@@ -5,38 +5,6 @@ type Environment = Readonly<Record<string, string | undefined>>;
 
 const SAME_SITE_VALUES = ['lax', 'strict', 'none'];
 
-/**
- * Monta as opcoes do modulo a partir das variaveis de ambiente do ecossistema.
- *
- * E o caminho curto para uma API nova. Os nomes sao os mesmos em toda
- * aplicacao ligada ao SSO, entao o `.env` de uma serve de modelo para a outra,
- * e o `app.module.ts` fica com uma linha: `SsoClientModule.forRootFromEnv()`.
- *
- * | Variavel | Obrigatoria | Vira |
- * |---|---|---|
- * | `SSO_ISSUER` | sim | `issuer` |
- * | `APP_CLIENT_ID` | sim | `clientId` |
- * | `APP_BASE_URL` | sim | `appBaseUrl` |
- * | `COOKIE_SECRET` | sim | `cookieSecret` |
- * | `APP_PRIVATE_KEY_FILE`, `APP_PRIVATE_KEY_BASE64` ou `APP_PRIVATE_KEY` | uma delas | `clientPrivateKeyPem` |
- * | `SSO_INTERNAL_URL` | nao | `internalBaseUrl` |
- * | `APP_POST_LOGIN_REDIRECT` | nao | `postLoginRedirect` |
- * | `APP_LOGIN_ERROR_REDIRECT` | nao | `loginErrorRedirect`; caminho ou URL http(s) |
- * | `APP_COOKIE_PREFIX` | nao | `cookiePrefix` |
- * | `APP_ROUTE_PREFIX` | nao | `routePrefix` |
- * | `APP_SESSION_MAX_AGE` | nao | `sessionMaxAgeSeconds` |
- * | `APP_GRANT_CHECK_SECONDS` | nao | `grantCheckSeconds`; `0` pergunta em toda requisicao |
- * | `COOKIE_SECURE` | nao | `cookieSecure`; so `false` desliga |
- * | `COOKIE_SAMESITE` | nao | `cookieSameSite` |
- *
- * **Tudo o que falta aparece de uma vez.** Configuracao incompleta derruba o
- * boot com a lista inteira, e nao uma variavel por vez: descobrir a terceira
- * so depois de corrigir a segunda e o que transforma configuracao em tarde
- * perdida. A mensagem cita nomes, nunca valores, porque metade deles e segredo.
- *
- * `overrides` ganha do ambiente, para o que a aplicacao preferir fixar no
- * codigo. Chave com `undefined` e ignorada, e nao apaga o que veio do ambiente.
- */
 export function ssoClientOptionsFromEnv(
   env: Environment = process.env,
   overrides: Partial<SsoClientOptions> = {},
@@ -146,8 +114,6 @@ export function ssoClientOptionsFromEnv(
     loginErrorRedirect,
     cookiePrefix: read('APP_COOKIE_PREFIX'),
     routePrefix: read('APP_ROUTE_PREFIX'),
-    // Seguro por padrao: so `false` explicito desliga, e so faz sentido em
-    // desenvolvimento sobre HTTP.
     cookieSecure: read('COOKIE_SECURE') !== 'false',
     cookieSameSite: sameSite as SsoClientOptions['cookieSameSite'],
     sessionMaxAgeSeconds,
@@ -156,10 +122,6 @@ export function ssoClientOptionsFromEnv(
   };
 }
 
-/**
- * Caminho desta origem ou URL http(s). `//host` e `/\host` ficam de fora: o
- * navegador os le como outro site, e um erro de digitacao viraria destino.
- */
 function isRedirectTarget(value: string): boolean {
   if (value.startsWith('/')) return !/^\/[/\\]/.test(value);
 

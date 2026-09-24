@@ -10,27 +10,8 @@ import {
 import type { SsoClientOptions } from '../config/ssoClientOptions';
 import type { SsoSessionData, SsoTokenResponse } from '../dto/ssoSession.dto';
 
-/** Onde a sessao renovada fica presa a requisicao. Ver `SsoSessionService.read`. */
 const RENEWED = Symbol('sso-client:renewed-session');
 
-/**
- * Sessao da aplicacao, materializada num cookie cifrado.
- *
- * A sessao existe para guardar o REFRESH token do lado do servidor, que e o
- * que a RFC 10017 secao 6.2.2.2 pede do token-mediating backend: o refresh
- * token nao chega ao navegador, so o access token chega, e por
- * `GET /auth/token`.
- *
- * O cookie e cifrado porque carrega credencial. Ele tambem carrega o access
- * token corrente, o que evita ida ao SSO a cada navegacao direta.
- *
- * Junto dele vai um segundo cookie, `app_csrf`, LEGIVEL e sem cifra. Ele
- * carrega o mesmo token anti-CSRF que esta dentro do cifrado, para o front
- * poder devolve-lo no header. A RFC 10017 secao 6.2.3.2 exige que este padrao
- * se defenda de CSRF, e autenticacao por cookie sozinha nao se defende: o
- * navegador anexa o cookie mesmo quando quem disparou a requisicao foi outro
- * site.
- */
 @Injectable()
 export class SsoSessionService {
   private readonly maxAgeSeconds: number;
@@ -39,51 +20,29 @@ export class SsoSessionService {
     @Inject(SSO_CLIENT_OPTIONS) options: SsoClientOptions,
     private cookies: SsoCookieService,
   ) {
-    // O cookie acompanha o REFRESH token, nao o access token: e ele que
-    // determina por quanto tempo a sessao ainda pode ser renovada. Se este
-    // valor ficar menor que o do SSO, o navegador descarta o cookie antes de
-    // o refresh token expirar, e a pessoa e mandada ao login sem razao
-    // aparente do lado do servidor.
     this.maxAgeSeconds = options.sessionMaxAgeSeconds ?? 90 * 24 * 60 * 60;
   }
 
-  /** Nome real do cookie, que muda com `cookieSecure` por causa do `__Host-`. */
   get cookieName(): string {
     return this.cookies.name(SSO_SESSION_COOKIE);
   }
 
-  /** Nome real do cookie legivel do anti-CSRF. O front le isto de `/auth/me`. */
   get csrfCookieName(): string {
     return this.cookies.name(SSO_CSRF_COOKIE);
   }
 
-  /**
-   * A sessao desta requisicao: a renovada, se o guard renovou durante ela, e so
-   * senao a que veio no cookie.
-   *
-   * O cookie da requisicao nao muda quando a resposta grava um novo. Quem lesse
-   * dele depois de uma renovacao pegaria o refresh token ja gasto, e usa-lo de
-   * novo e reuso para o SSO, que derruba a sessao inteira. `GET /auth/token`
-   * fazia exatamente isso quando o token estava perto de vencer.
-   */
   read(req: Request): SsoSessionData | null {
-    const renovada = (req as Request & { [RENEWED]?: SsoSessionData })[RENEWED];
+    const renewed = (req as Request & { [RENEWED]?: SsoSessionData })[RENEWED];
 
-    if (renovada) return renovada;
+    if (renewed) return renewed;
 
     return this.cookies.get<SsoSessionData>(req, SSO_SESSION_COOKIE);
   }
 
-  /** Guarda na requisicao a sessao que acabou de ser renovada. Ver `read`. */
   remember(req: Request, session: SsoSessionData): void {
     (req as Request & { [RENEWED]?: SsoSessionData })[RENEWED] = session;
   }
 
-  /**
-   * Grava a sessao. `csrfToken` chega preenchido na renovacao silenciosa, para
-   * que o valor sobreviva: trocar o token a cada refresh derrubaria a copia
-   * que o front ja tem, e a proxima escrita dele falharia sem motivo.
-   */
   write(
     res: Response,
     tokens: SsoTokenResponse,

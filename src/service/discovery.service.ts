@@ -3,14 +3,6 @@ import { SSO_CLIENT_OPTIONS } from '../ssoClient.constant';
 import type { SsoClientOptions } from '../config/ssoClientOptions';
 import type { AuthorizationServerMetadata } from '../dto/ssoSession.dto';
 
-/**
- * Descoberta dos endpoints do Authorization Server (RFC 8414).
- *
- * Ler os endpoints do proprio servidor evita espalhar URL fixa por aplicacao:
- * se o SSO mudar de caminho, ninguem precisa redeployar. A busca e preguicosa
- * e o resultado fica em memoria, entao um SSO fora do ar no boot nao impede a
- * aplicacao de subir.
- */
 @Injectable()
 export class SsoDiscoveryService {
   private readonly logger = new Logger(SsoDiscoveryService.name);
@@ -30,7 +22,6 @@ export class SsoDiscoveryService {
   async metadata(): Promise<AuthorizationServerMetadata> {
     if (this.cached) return this.cached;
 
-    // Duas requisicoes simultaneas no boot compartilham a mesma busca.
     this.inFlight ??= this.fetchMetadata();
 
     try {
@@ -51,9 +42,6 @@ export class SsoDiscoveryService {
 
     const metadata = (await res.json()) as AuthorizationServerMetadata;
 
-    // RFC 8414 secao 3.3: o `issuer` devolvido tem de ser identico ao
-    // configurado. Divergencia significa configuracao apontando para o
-    // servidor errado, e a checagem NAO afrouxa por causa do endereco interno.
     if (metadata.issuer !== this.issuer) {
       throw new Error(
         `issuer do discovery (${metadata.issuer}) diferente do configurado (${this.issuer})`,
@@ -64,9 +52,7 @@ export class SsoDiscoveryService {
 
     return {
       issuer: metadata.issuer,
-      // Publico: quem abre e o navegador do usuario.
       authorization_endpoint: metadata.authorization_endpoint,
-      // Internos: chamados por este processo.
       token_endpoint: this.toInternal(metadata.token_endpoint),
       jwks_uri: this.toInternal(metadata.jwks_uri),
       revocation_endpoint: metadata.revocation_endpoint
@@ -75,16 +61,13 @@ export class SsoDiscoveryService {
       permissions_endpoint: metadata.permissions_endpoint
         ? this.toInternal(metadata.permissions_endpoint)
         : undefined,
-      // RFC 7662. SSO anterior a ele nao anuncia, e a introspeccao desliga.
       introspection_endpoint: metadata.introspection_endpoint
         ? this.toInternal(metadata.introspection_endpoint)
         : undefined,
-      // Publico: e a audiencia que o SSO espera na asserção de cliente.
       token_endpoint_public: metadata.token_endpoint,
     };
   }
 
-  /** Troca o prefixo publico pelo endereco de rede, quando houver um. */
   private toInternal(endpoint: string): string {
     if (this.internalBaseUrl === this.issuer) return endpoint;
 

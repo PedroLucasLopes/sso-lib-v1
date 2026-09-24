@@ -20,10 +20,6 @@ import type { SsoMe, SsoUser } from '../dto/ssoSession.dto';
 import { SsoOAuthService } from '../service/ssoOAuth.service';
 import { SsoSessionService } from '../service/ssoSession.service';
 
-/**
- * Rotas de autenticacao montadas automaticamente pelo modulo em `/auth`.
- * A aplicacao que consome a biblioteca nao precisa escrever nenhuma delas.
- */
 @Controller('auth')
 export class SsoAuthController {
   constructor(
@@ -31,10 +27,6 @@ export class SsoAuthController {
     private sessions: SsoSessionService,
   ) {}
 
-  /**
-   * Inicia o login. Com sessao valida ja existente, volta direto para a
-   * aplicacao em vez de reiniciar o fluxo.
-   */
   @Get('login')
   @SsoLogin()
   async login(
@@ -62,7 +54,6 @@ export class SsoAuthController {
     );
   }
 
-  /** Encerra so a sessao local. A sessao no SSO continua de pe. */
   @Post('logout')
   @SsoAuthenticated()
   @HttpCode(HttpStatus.NO_CONTENT)
@@ -73,17 +64,8 @@ export class SsoAuthController {
     await this.oauth.logout(req, res);
   }
 
-  /**
-   * Entrega o access token corrente (RFC 10017 secao 6.2.2.1, "check session").
-   *
-   * Quem tem a sessao pega o token aqui e passa a usar `Authorization: Bearer`
-   * nas chamadas seguintes. O refresh token NAO sai: fica no servidor, ligado
-   * a sessao (secao 6.2.2.2). O cliente segura credencial de minutos e volta
-   * aqui quando ela expira.
-   */
   @Get('token')
   @SsoAuthenticated()
-  // Quem pega o token vai usa-lo como Bearer: ele sai com o papel de agora.
   @SsoFreshGrant()
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')
@@ -95,18 +77,8 @@ export class SsoAuthController {
     return this.oauth.currentAccessToken(req, res);
   }
 
-  /**
-   * Identidade, permissoes e token anti-CSRF do usuario corrente.
-   *
-   * E o que a interface chama logo depois do login: com isto ela monta o menu
-   * e ja fica com o valor que precisa devolver no header `X-CSRF-Token` nas
-   * requisicoes que mudam estado. O mesmo valor tambem chega pelo cookie
-   * legivel `app_csrf`; os dois caminhos existem para o front escolher.
-   */
   @Get('me')
   @SsoAuthenticated()
-  // A tela consulta esta rota justamente para saber o que mudou no SSO: ela
-  // pergunta a cada chamada, sem esperar a janela de `grantCheckSeconds`.
   @SsoFreshGrant()
   @HttpCode(HttpStatus.OK)
   @Header('Cache-Control', 'no-store')

@@ -7,12 +7,9 @@ import {
 } from './clientAssertion.service';
 import { SsoDiscoveryService } from './discovery.service';
 
-/** O que o SSO diz do grant de um token, reduzido ao que o guard usa. */
 export interface SsoGrantState {
   active: boolean;
-  /** O papel da pessoa agora, lido do banco do SSO. */
   roles?: string[];
-  /** A impressao digital do conjunto desse papel agora. */
   perm?: string;
 }
 
@@ -23,35 +20,8 @@ interface CachedState {
 
 const DEFAULT_CHECK_SECONDS = 30;
 
-/** Acima disto, o mapa se limpa. Tokens giram a cada 15 minutos. */
 const MAX_ENTRIES = 5_000;
 
-/**
- * Pergunta ao SSO se o grant de um access token continua valendo, e qual e o
- * papel da pessoa agora (introspeccao, RFC 7662).
- *
- * O access token e assinado e conferido sem consulta, e por isso continuava
- * valendo ate expirar depois de o SSO mudar de ideia: papel trocado, pessoa
- * tirada do projeto, aplicacao suspensa, logout. O guard pergunta aqui, no
- * maximo uma vez por token a cada `grantCheckSeconds`, e age conforme a
- * resposta: grant encerrado derruba a sessao, papel diferente do token pede um
- * token novo na hora.
- *
- * A RFC 7662 secao 4 chama o prazo de guarda de janela em que um token revogado
- * ainda parece valido. E ela que `grantCheckSeconds` controla, e ela fica em 30
- * segundos em vez dos 15 minutos da vida do token.
- *
- * **Quando nao da para perguntar**, o guard segue com o que o token diz, que e o
- * comportamento de antes desta checagem:
- *
- * - SSO que ainda nao anuncia `introspection_endpoint`: a checagem desliga;
- * - SSO fora do ar ou limitando requisicoes: vale o ultimo estado conhecido, ou
- *   o token, se nunca houve resposta. A janela continua curta, porque sem o SSO
- *   nenhum token se renova e o access token dura 15 minutos.
- *
- * **A excecao e o 401.** O SSO so recusa autenticar esta aplicacao quando ela
- * foi suspensa ou a chave dela foi revogada, e ai nenhuma sessao dela vale mais.
- */
 @Injectable()
 export class SsoIntrospectionService {
   private readonly logger = new Logger(SsoIntrospectionService.name);
@@ -69,11 +39,6 @@ export class SsoIntrospectionService {
     this.maxAgeMs = (options.grantCheckSeconds ?? DEFAULT_CHECK_SECONDS) * 1000;
   }
 
-  /**
-   * O estado do grant do token, ou `null` quando nao da para saber. `fresh`
-   * ignora a janela, para quem precisa da resposta de agora, como
-   * `GET /auth/me`.
-   */
   async check(
     token: string,
     jti: string,
@@ -89,17 +54,12 @@ export class SsoIntrospectionService {
       return cached.state;
     }
 
-    // Requisicoes simultaneas do mesmo token esperam a mesma pergunta.
     const pending =
       this.inFlight.get(jti) ?? this.start(token, jti, cached ?? null);
 
     return pending;
   }
 
-  /**
-   * O guard acabou de renovar por causa de uma mudanca: o token novo nasce com
-   * o estado que motivou a renovacao, sem perguntar de novo em seguida.
-   */
   remember(jti: string, state: SsoGrantState): void {
     this.store(jti, state);
   }
@@ -151,11 +111,11 @@ export class SsoIntrospectionService {
           'o SSO recusou autenticar esta aplicacao na introspeccao: projeto suspenso ou chave revogada',
         );
 
-        const inativo: SsoGrantState = { active: false };
+        const inactive: SsoGrantState = { active: false };
 
-        this.store(jti, inativo);
+        this.store(jti, inactive);
 
-        return inativo;
+        return inactive;
       }
 
       if (!res.ok) {
@@ -209,21 +169,19 @@ export class SsoIntrospectionService {
     this.cache.set(jti, { state, checkedAt: Date.now() });
   }
 
-  /** Tira o que ja saiu da janela; se nao bastar, os mais antigos primeiro. */
   private prune(): void {
-    const limite = Date.now() - this.maxAgeMs;
+    const limit = Date.now() - this.maxAgeMs;
 
-    for (const [jti, entrada] of this.cache) {
-      if (entrada.checkedAt < limite) this.cache.delete(jti);
+    for (const [jti, entry] of this.cache) {
+      if (entry.checkedAt < limit) this.cache.delete(jti);
     }
 
-    // O Map guarda a ordem de insercao: as primeiras chaves sao as mais velhas.
     while (this.cache.size >= MAX_ENTRIES) {
-      const maisVelha = this.cache.keys().next().value;
+      const oldest = this.cache.keys().next().value;
 
-      if (maisVelha === undefined) break;
+      if (oldest === undefined) break;
 
-      this.cache.delete(maisVelha);
+      this.cache.delete(oldest);
     }
   }
 }

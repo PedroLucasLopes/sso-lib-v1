@@ -1,25 +1,5 @@
 import * as crypto from 'node:crypto';
 
-/**
- * Ferramentas para uma aplicacao testar a si mesma contra um SSO de verdade.
- *
- * Existe aqui, e nao no repositorio do SSO, por uma razao de arquitetura: cada
- * aplicacao do ecossistema e independente, com repositorio, infraestrutura e
- * ciclo de vida proprios. Se o teste de uma delas precisasse importar codigo de
- * dentro do SSO, a independencia seria de fachada. Este pacote ja e o contrato
- * entre o SSO e quem se conecta a ele, entao e ele que viaja junto.
- *
- * ⚠️ **Nada disto e para producao.** Tudo aqui pressupoe credenciais de
- * OPERADOR do SSO: a string de conexao do banco e a `COOKIE_SECRET`. Sao as
- * mesmas credenciais que quem administra o ambiente de desenvolvimento ja tem.
- * Um ambiente onde a aplicacao nao deveria ter isso e um ambiente onde estes
- * helpers nao rodam, e e assim mesmo que deve ser.
- *
- * O que eles substituem: o login federado no provedor de identidade, que um
- * teste automatizado nao tem como fazer. O resto do caminho e real.
- */
-
-/** Cliente SQL minimo. Evita depender de `pg` aqui: quem chama traz o dele. */
 export interface SqlClient {
   query(
     text: string,
@@ -28,35 +8,24 @@ export interface SqlClient {
 }
 
 export interface SsoTestOptions {
-  /** Identidade publica do SSO, com prefixo. Ex.: `http://localhost:8080/sso`. */
   issuer: string;
-  /** `COOKIE_SECRET` do SSO, em hex. E com ela que a sessao e selada. */
   cookieSecret: string;
-  /** Nome do `Project` que representa o proprio SSO no catalogo dele. */
   selfProjectName?: string;
 }
 
-const SELF_PROJECT_PADRAO = 'SSO';
+const DEFAULT_SELF_PROJECT = 'SSO';
 
 const CLIENT_ASSERTION_TYPE =
   'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
 
-/**
- * Carimbo em UTC.
- *
- * O Prisma grava e le `DateTime` como UTC, e o `now()` do Postgres devolve a
- * hora local do servidor. Num banco fora de UTC, `now()` cru faz a linha nascer
- * no passado, e a sessao ja aparece expirada para o servidor.
- */
-const AGORA = "(now() AT TIME ZONE 'utc')";
+const NOW = "(now() AT TIME ZONE 'utc')";
 
-const uma = async <T = Record<string, unknown>>(
+const one = async <T = Record<string, unknown>>(
   db: SqlClient,
   sql: string,
   params: unknown[] = [],
 ): Promise<T | undefined> => (await db.query(sql, params)).rows[0] as T | undefined;
 
-/** Sela um valor no mesmo formato do `CookieService`: AES-256-GCM, `iv.tag.texto`. */
 export function sealSsoCookie(cookieSecret: string, payload: unknown): string {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(
@@ -65,7 +34,7 @@ export function sealSsoCookie(cookieSecret: string, payload: unknown): string {
     iv,
   );
 
-  const texto = Buffer.concat([
+  const sealed = Buffer.concat([
     cipher.update(JSON.stringify(payload), 'utf8'),
     cipher.final(),
   ]);
@@ -73,46 +42,40 @@ export function sealSsoCookie(cookieSecret: string, payload: unknown): string {
   return [
     iv.toString('base64url'),
     cipher.getAuthTag().toString('base64url'),
-    texto.toString('base64url'),
+    sealed.toString('base64url'),
   ].join('.');
 }
 
-async function projetoPorNome(
+async function projectByName(
   db: SqlClient,
-  nome: string,
+  name: string,
 ): Promise<{ id: string; clientId: string }> {
-  const projeto = await uma<{ id: string; clientId: string }>(
+  const project = await one<{ id: string; clientId: string }>(
     db,
     'SELECT id, "clientId" FROM "Project" WHERE name = $1',
-    [nome],
+    [name],
   );
 
-  if (!projeto) {
+  if (!project) {
     throw new Error(
-      `o projeto "${nome}" nao existe no catalogo do SSO; cadastre-o antes de rodar o teste`,
+      `o projeto "${name}" nao existe no catalogo do SSO; cadastre-o antes de rodar o teste`,
     );
   }
 
-  return projeto;
+  return project;
 }
 
-/**
- * Cria uma sessao do usuario com o SSO e devolve o cookie pronto.
- *
- * E o que substitui o login no provedor federado. A partir daqui o fluxo e
- * real: `/authorize` ve a sessao viva e emite o code na hora.
- */
 export async function createSsoSession(
   db: SqlClient,
   options: SsoTestOptions & { userId: string; ttlMinutes?: number },
 ): Promise<{ sessionId: string; cookie: string }> {
   const sessionId = crypto.randomUUID();
-  const minutos = options.ttlMinutes ?? 60;
+  const minutes = options.ttlMinutes ?? 60;
 
   await db.query(
     `INSERT INTO "AuthSession" (id, "userId", "expiresAt", "createdAt", "lastSeenAt")
-     VALUES ($1, $2, ${AGORA} + ($3 || ' minutes')::interval, ${AGORA}, ${AGORA})`,
-    [sessionId, options.userId, String(minutos)],
+     VALUES ($1, $2, ${NOW} + ($3 || ' minutes')::interval, ${NOW}, ${NOW})`,
+    [sessionId, options.userId, String(minutes)],
   );
 
   return {
@@ -121,7 +84,6 @@ export async function createSsoSession(
   };
 }
 
-/** Garante que um usuario existe e tem `role` no projeto indicado. */
 export async function ensureProjectUser(
   db: SqlClient,
   options: {
@@ -131,28 +93,28 @@ export async function ensureProjectUser(
     role: string;
   },
 ): Promise<{ userId: string }> {
-  const projeto = await projetoPorNome(db, options.projectName);
+  const project = await projectByName(db, options.projectName);
 
-  const papel = await uma<{ id: string }>(
+  const role = await one<{ id: string }>(
     db,
     'SELECT id FROM "Role" WHERE name = $1 AND "projectId" = $2',
-    [options.role, projeto.id],
+    [options.role, project.id],
   );
 
-  if (!papel) {
+  if (!role) {
     throw new Error(
       `o papel ${options.role} nao existe no projeto ${options.projectName}`,
     );
   }
 
-  let usuario = await uma<{ id: string }>(
+  let user = await one<{ id: string }>(
     db,
     'SELECT id FROM "User" WHERE email = $1',
     [options.email],
   );
 
-  if (!usuario) {
-    usuario = await uma<{ id: string }>(
+  if (!user) {
+    user = await one<{ id: string }>(
       db,
       'INSERT INTO "User" (id, email, name) VALUES ($1, $2, $3) RETURNING id',
       [
@@ -167,80 +129,68 @@ export async function ensureProjectUser(
     `INSERT INTO "ProjectUser" ("userId", "projectId", "roleId")
      VALUES ($1, $2, $3)
      ON CONFLICT ("userId", "projectId") DO UPDATE SET "roleId" = EXCLUDED."roleId"`,
-    [usuario!.id, projeto.id, papel.id],
+    [user!.id, project.id, role.id],
   );
 
-  return { userId: usuario!.id };
+  return { userId: user!.id };
 }
 
-/** Asercao de cliente do `private_key_jwt` (RFC 7523 secao 2.2). */
 function clientAssertion(
   clientId: string,
   privateKeyPem: string,
   tokenEndpoint: string,
 ): string {
-  const agora = Math.floor(Date.now() / 1000);
-  const b64 = (o: unknown) =>
-    Buffer.from(JSON.stringify(o)).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const b64 = (value: unknown) =>
+    Buffer.from(JSON.stringify(value)).toString('base64url');
 
-  const entrada = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({
+  const signingInput = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({
     iss: clientId,
     sub: clientId,
     aud: tokenEndpoint,
     jti: crypto.randomUUID(),
-    iat: agora,
-    exp: agora + 60,
+    iat: now,
+    exp: now + 60,
   })}`;
 
-  return `${entrada}.${crypto
-    .sign('sha256', Buffer.from(entrada), privateKeyPem)
+  return `${signingInput}.${crypto
+    .sign('sha256', Buffer.from(signingInput), privateKeyPem)
     .toString('base64url')}`;
 }
 
-/**
- * Emite um access token administrativo percorrendo o fluxo OAuth inteiro.
- *
- * Serve ao teste que precisa cadastrar rota, papel ou usuario no SSO antes de
- * exercitar a propria aplicacao. Nao contorna autorizacao: o token sai com o
- * `sub` da pessoa e com o papel que ela tem em `ProjectUser`. Quem nao
- * administra recebe um token que nao abre nada.
- *
- * A chave de cliente efemera e a sessao usadas no caminho sao desfeitas antes
- * de retornar.
- */
 export async function mintAdminToken(
   db: SqlClient,
   options: SsoTestOptions & { email: string },
 ): Promise<{ token: string; expiresIn: number; role: string; userId: string }> {
   const sso = options.issuer.replace(/\/+$/, '');
-  const nomeDoProjeto = options.selfProjectName ?? SELF_PROJECT_PADRAO;
-  const projeto = await projetoPorNome(db, nomeDoProjeto);
+  const projectName = options.selfProjectName ?? DEFAULT_SELF_PROJECT;
+  const project = await projectByName(db, projectName);
 
-  const redirect = await uma<{ redirectUri: string }>(
+  const redirect = await one<{ redirectUri: string }>(
     db,
     'SELECT "redirectUri" FROM "redirectUri" WHERE "projectId" = $1 ORDER BY "redirectUri" LIMIT 1',
-    [projeto.id],
+    [project.id],
   );
 
   if (!redirect) {
-    throw new Error(`o projeto ${nomeDoProjeto} nao tem redirect_uri cadastrada`);
+    throw new Error(`o projeto ${projectName} nao tem redirect_uri cadastrada`);
   }
 
-  const operador = await uma<{ id: string; papel: string }>(
+  const operator = await one<{ id: string; role: string }>(
     db,
-    `SELECT u.id, r.name AS papel
+    `SELECT u.id, r.name AS role
        FROM "User" u
        JOIN "ProjectUser" pu ON pu."userId" = u.id AND pu."projectId" = $1
        JOIN "Role" r ON r.id = pu."roleId"
       WHERE u.email = $2`,
-    [projeto.id, options.email],
+    [project.id, options.email],
   );
 
-  if (!operador) {
-    throw new Error(`${options.email} nao tem papel no projeto ${nomeDoProjeto}`);
+  if (!operator) {
+    throw new Error(`${options.email} nao tem papel no projeto ${projectName}`);
   }
 
-  const par = crypto.generateKeyPairSync('rsa', {
+  const pair = crypto.generateKeyPairSync('rsa', {
     modulusLength: 2048,
     publicKeyEncoding: { type: 'spki', format: 'pem' },
     privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
@@ -249,7 +199,7 @@ export async function mintAdminToken(
   const clientKeyId = crypto.randomUUID();
   let sessionId = '';
 
-  const limpar = async () => {
+  const clean = async () => {
     await db.query('DELETE FROM "ClientKey" WHERE id = $1', [clientKeyId]);
 
     if (sessionId) {
@@ -262,17 +212,17 @@ export async function mintAdminToken(
   try {
     await db.query(
       `INSERT INTO "ClientKey" (id, "projectId", algorithm, "publicKeyPem", "createdAt", "expiresAt")
-       VALUES ($1, $2, 'RS256', $3, ${AGORA}, ${AGORA} + interval '5 minutes')`,
-      [clientKeyId, projeto.id, par.publicKey],
+       VALUES ($1, $2, 'RS256', $3, ${NOW}, ${NOW} + interval '5 minutes')`,
+      [clientKeyId, project.id, pair.publicKey],
     );
 
-    const sessao = await createSsoSession(db, {
+    const session = await createSsoSession(db, {
       ...options,
-      userId: operador.id,
+      userId: operator.id,
       ttlMinutes: 5,
     });
 
-    sessionId = sessao.sessionId;
+    sessionId = session.sessionId;
 
     const verifier = crypto.randomBytes(32).toString('base64url');
     const challenge = crypto
@@ -281,7 +231,7 @@ export async function mintAdminToken(
       .digest('base64url');
 
     const query = new URLSearchParams({
-      client_id: projeto.clientId,
+      client_id: project.clientId,
       redirect_uri: redirect.redirectUri,
       response_type: 'code',
       code_challenge: challenge,
@@ -289,16 +239,16 @@ export async function mintAdminToken(
       state: crypto.randomBytes(16).toString('base64url'),
     });
 
-    const autorizacao = await fetch(`${sso}/oauth/authorize?${query.toString()}`, {
+    const authorization = await fetch(`${sso}/oauth/authorize?${query.toString()}`, {
       redirect: 'manual',
-      headers: { cookie: sessao.cookie },
+      headers: { cookie: session.cookie },
     });
 
-    const local = autorizacao.headers.get('location');
+    const local = authorization.headers.get('location');
 
     if (!local || !local.startsWith(redirect.redirectUri)) {
       throw new Error(
-        `authorize nao devolveu o code (HTTP ${autorizacao.status}, location ${local ?? 'ausente'})`,
+        `authorize nao devolveu o code (HTTP ${authorization.status}, location ${local ?? 'ausente'})`,
       );
     }
 
@@ -306,7 +256,7 @@ export async function mintAdminToken(
 
     if (!code) throw new Error(`authorize devolveu erro: ${local}`);
 
-    const troca = await fetch(`${sso}/oauth/token`, {
+    const swap = await fetch(`${sso}/oauth/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -316,41 +266,35 @@ export async function mintAdminToken(
         redirect_uri: redirect.redirectUri,
         client_assertion_type: CLIENT_ASSERTION_TYPE,
         client_assertion: clientAssertion(
-          projeto.clientId,
-          par.privateKey,
+          project.clientId,
+          pair.privateKey,
           `${sso}/oauth/token`,
         ),
       }),
     });
 
-    const corpo = (await troca.json()) as {
+    const body = (await swap.json()) as {
       access_token?: string;
       expires_in?: number;
     };
 
-    if (!troca.ok || !corpo.access_token) {
+    if (!swap.ok || !body.access_token) {
       throw new Error(
-        `token endpoint recusou: HTTP ${troca.status} ${JSON.stringify(corpo)}`,
+        `token endpoint recusou: HTTP ${swap.status} ${JSON.stringify(body)}`,
       );
     }
 
     return {
-      token: corpo.access_token,
-      expiresIn: corpo.expires_in ?? 0,
-      role: operador.papel,
-      userId: operador.id,
+      token: body.access_token,
+      expiresIn: body.expires_in ?? 0,
+      role: operator.role,
+      userId: operator.id,
     };
   } finally {
-    await limpar().catch(() => undefined);
+    await clean().catch(() => undefined);
   }
 }
 
-/**
- * Apaga do SSO o que uma rodada de teste criou.
- *
- * Por e-mail exato, nunca por padrao: limpeza com curinga e limpeza que um dia
- * apaga dado real. A ordem das tabelas segue as chaves estrangeiras.
- */
 export async function purgeTestUsers(
   db: SqlClient,
   emails: string[],
@@ -362,7 +306,7 @@ export async function purgeTestUsers(
     [emails],
   );
 
-  const ids = rows.map((linha) => linha.id as string);
+  const ids = rows.map((line) => line.id as string);
 
   if (!ids.length) return 0;
 

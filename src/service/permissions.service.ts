@@ -19,36 +19,10 @@ interface CachedSet {
   fetchedAt: number;
 }
 
-/**
- * Quanto tempo um conjunto guardado vale. O hash so muda dentro do token quando
- * ele e renovado, e isso leva ate 15 minutos; sem este prazo, uma permissao
- * revogada no console continuaria valendo esse tempo todo.
- */
 const MAX_AGE_MS = 60_000;
 
-/**
- * Intervalo minimo entre duas buscas forcadas do mesmo papel. Uma rota negada
- * repetidas vezes nao vira uma chamada ao SSO por requisicao.
- */
 const REVALIDATE_INTERVAL_MS = 5_000;
 
-/**
- * Resolve a claim `roles` do access token no conjunto de rotas que o papel
- * libera, e guarda o resultado em memoria.
- *
- * Existe porque o token carrega o PAPEL, nao a lista enumerada de rotas
- * (RFC 9068 secao 2.2.3.1). Antes a lista ia dentro do token, que crescia com
- * o numero de rotas do projeto: com 38 rotas o token chegou a 3 KB e o cookie
- * de sessao passou do limite de 4 KB do navegador, que o descartava calado.
- *
- * O banco do SSO e a fonte de verdade, e as mudancas feitas no console chegam
- * aqui por dois caminhos:
- *
- * - **Concessao:** antes de negar uma rota, o guard pede uma busca nova. A
- *   permissao recem-concedida vale na requisicao seguinte.
- * - **Revogacao:** cada conjunto vale no maximo 60 segundos. Depois disso, a
- *   proxima requisicao busca de novo.
- */
 @Injectable()
 export class SsoPermissionsService {
   private readonly logger = new Logger(SsoPermissionsService.name);
@@ -65,10 +39,6 @@ export class SsoPermissionsService {
     this.clientId = options.clientId;
   }
 
-  /**
-   * Une os papeis do token num conjunto so de permissoes. `revalidate` pede uma
-   * busca nova, respeitando o intervalo minimo entre buscas do mesmo papel.
-   */
   async forRoles(
     roles: string[],
     hash: string,
@@ -98,16 +68,11 @@ export class SsoPermissionsService {
       if (revalidate ? justFetched : fresh) return cached.permissions;
     }
 
-    // Varias requisicoes simultaneas compartilham uma busca so por papel.
     const pending = this.inFlight.get(role) ?? this.startFetch(role, key);
 
     try {
       return await pending;
     } catch (error) {
-      /* SSO fora do ar: o ultimo conjunto conhecido segue valendo ate ele
-       * voltar. A janela e curta por construcao, porque sem o SSO nenhum token
-       * se renova e o access token dura 15 minutos. Sem conjunto guardado nao
-       * ha o que servir, e o erro sobe. */
       if (!cached) throw error;
 
       this.logger.warn(
@@ -149,9 +114,6 @@ export class SsoPermissionsService {
       }),
     });
 
-    /* Papel que o SSO nao conhece mais, apagado ou renomeado, nao alcanca nada
-     * ate o token renovar com o nome novo. Isso nao e SSO fora do ar: manter o
-     * conjunto antigo deixaria valer o que ja nao existe. */
     if (res.status === 404) {
       const empty: CachedSet = { permissions: [], fetchedAt: Date.now() };
 
@@ -174,9 +136,6 @@ export class SsoPermissionsService {
       fetchedAt: Date.now(),
     };
 
-    /* Guarda sob o hash que o SSO devolveu e tambem sob o que veio no token.
-     * Quando os dois divergem, o conjunto novo e o que vale agora; sem a segunda
-     * chave, todo pedido com o token antigo buscaria de novo ate ele renovar. */
     this.cache.set(`${role}:${body.hash}`, entry);
     this.cache.set(key, entry);
     this.lastFetch.set(role, entry.fetchedAt);
