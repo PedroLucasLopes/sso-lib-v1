@@ -1,0 +1,13 @@
+# Arquivo de texto entra no git em LF e sai em LF, em qualquer maquina. Sem isto,
+# um clone com core.autocrlf=true escreve CRLF no disco, e o prettier recusa o
+# arquivo inteiro na linha 1.
+* text=auto eol=lf
+
+# Binario nao passa por conversao nenhuma.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.docx binary
