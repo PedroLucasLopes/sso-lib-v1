@@ -1,0 +1,59 @@
+# Integracao continua do sso-lib-v1: auditoria das dependencias, lint,
+# compilacao e o conteudo do pacote, em pull request e em push na main. A entrega
+# e o `publish.yml`, que publica no GitHub Packages quando chega uma tag v*.
+#
+# O teste da biblioteca de verdade e o ponta a ponta do krloc-api-v1, que sobe a
+# API com ela contra um SSO de pe.
+#
+# O pipeline tambem e superficie de ataque: cada action e fixada por commit, e
+# nao por tag, que pode ser movida; o token tem so leitura; e o checkout nao
+# deixa credencial no disco para os passos seguintes.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Auditoria, lint e build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar
+        run: npm ci
+
+      # O que vai para as APIs nao passa com aviso nenhum; o resto, sem alto.
+      - name: Auditar dependencias de producao
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Auditar todas as dependencias
+        run: npm audit --audit-level=high
+
+      - run: npm run lint:check
+
+      - run: npm run build
+
+      # O que o pacote leva: so `dist`, sem fonte, teste nem configuracao.
+      - name: Conferir o conteudo do pacote
+        run: npm pack --dry-run
