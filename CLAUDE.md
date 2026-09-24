@@ -46,6 +46,9 @@ O pacote é **`@pedrolucaslopes/sso-client`**, privado, no GitHub Packages, com 
 `PedroLucasLopes/sso-lib-v1`. O nome do repositório não precisa bater com o do pacote; o escopo do npm
 tem de ser o dono no GitHub, em minúsculas.
 
+- **Branch:** o trabalho nasce em `feat/*`, `fix/*` ou `bugfix/*`, vai por pull request para a
+  `development` e só chega na `main` por um segundo pull request, revisado à mão. A tag de publicação
+  sai da `main`, nunca da `development`.
 - **Publicar:** `npm version patch` e `git push --follow-tags`. A tag `v*` dispara
   `.github/workflows/publish.yml`, que confere a tag contra a versão e publica com o `GITHUB_TOKEN`
   da própria execução. Nenhum token pessoal fica guardado em secret.

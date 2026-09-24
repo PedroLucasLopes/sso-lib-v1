@@ -1,9 +1,14 @@
 # Integracao continua do sso-lib-v1: auditoria das dependencias, lint,
-# compilacao e o conteudo do pacote, em pull request e em push na main. A entrega
-# e o `publish.yml`, que publica no GitHub Packages quando chega uma tag v*.
+# compilacao e o conteudo do pacote, em pull request e em push na main e na
+# development. A entrega e o `publish.yml`, que publica no GitHub Packages
+# quando chega uma tag v*.
 #
 # O teste da biblioteca de verdade e o ponta a ponta do krloc-api-v1, que sobe a
 # API com ela contra um SSO de pe.
+#
+# O trabalho nasce numa branch feat/*, fix/* ou bugfix/*, vai por pull request
+# para a development e so chega na main por um segundo pull request, revisado a
+# mao. Publicar o pacote continua sendo coisa de tag v*, que so nasce na main.
 #
 # O pipeline tambem e superficie de ataque: cada action e fixada por commit, e
 # nao por tag, que pode ser movida; o token tem so leitura; e o checkout nao
@@ -12,9 +17,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
   workflow_dispatch:
 
 permissions: {}
