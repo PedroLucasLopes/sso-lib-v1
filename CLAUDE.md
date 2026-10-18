@@ -60,6 +60,29 @@ publicada.
 
 **Não introduza dependência de nada fora de `sso-client/src`.** É o que mantém o pacote independente.
 
+### NestJS 11 e 12
+
+O `peerDependencies` aceita as duas linhas: `@nestjs/common` e `@nestjs/core` em `^11 || ^12`, e
+`@nestjs/config` em `^4 || ^12`, porque a 12 do config acompanha a numeração do core e aceita as duas. Sem
+isso, uma API no Nest 12 não instalava o pacote: o npm recusa o par.
+
+**O Nest 12 é só ESM, e esta biblioteca é CommonJS.** Funciona porque o Node carrega ESM por `require()`,
+sem flag a partir do 20.19 e do 22.12, e o próprio Nest 12 já exige isso de qualquer aplicação CommonJS:
+não é requisito novo. Também não há instância duplicada do Nest. O pacote do 12 só tem a cópia ESM, e o
+`require()` da biblioteca recebe o mesmo módulo que o `import` da aplicação.
+
+As `devDependencies` ficam no 11, a linha mais antiga aceita, para o build provar o 11 a cada pull
+request. Subi-las para o 12, como o Dependabot propõe, deixaria o 11 sem ninguém que o confira.
+
+O 12 foi conferido na `0.6.0` com o pacote do `npm pack` numa aplicação de teste no Nest 12.1.3, com
+`@nestjs/config` 12.0.1 e TypeScript 6 em `nodenext` com `skipLibCheck: false`, nas duas formas,
+CommonJS e ESM, contra o SSO de pé: o boot do módulo, o `cookie-parser` em `{*splat}`, todos os
+níveis, o decorator na classe (`Reflector.getAllAndOverride`), `@CurrentUser()` e `@CurrentToken()`
+(`createParamDecorator`), o filtro do `login_required`, os corpos de `invalid_token`,
+`csrf_token_invalid` e `origin_not_allowed`, o 404 da rota negada igual ao do roteador campo a campo, o
+login completo, a introspecção, a renovação silenciosa e o logout. O `test:sso` do krloc prova só a
+linha em que o krloc está; antes de aceitar uma linha nova do Nest, repita essa conferência.
+
 ### CI
 
 `.github/workflows/ci.yml` roda em pull request e push na `main`: `npm ci`, `npm audit` (produção sem
@@ -635,6 +658,9 @@ linha, que sobrevive mal a uma variável de ambiente.
 - O que está em `testing/` exige credencial de operador do SSO e **nunca** sai do ponto de entrada
   separado. Não reexporte pelo `index.ts`.
 - Rode `npm run test:sso` no krloc depois de mexer aqui: é o teste que exercita a biblioteca inteira.
+- O peer do Nest aceita o 11 e o 12, e as `devDependencies` ficam na linha mais antiga. Linha nova só
+  entra na faixa depois de conferida numa aplicação naquela linha, porque o `test:sso` prova só a do
+  krloc. Tirar uma linha da faixa pede `major`.
 - Nome de variável lida por `forRootFromEnv` é contrato. Renomear, ou tornar obrigatória uma opcional,
   quebra quem já instalou e pede versão `major`.
 - Configuração incompleta cita nomes, nunca valores: metade das variáveis é segredo.

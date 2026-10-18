@@ -33,6 +33,10 @@ build do Docker, passe como secret do BuildKit, nunca como `ARG` ou `ENV`, que f
 npm i @pedrolucaslopes/sso-client @nestjs/config
 ```
 
+Serve ao NestJS 11 e ao 12, com o `@nestjs/config` 4 ou 12. O Nest 12 é só ESM e a biblioteca é
+CommonJS: no 12, a API precisa de Node 20.19+ ou 22.12+, o mesmo que o Nest 12 já pede de qualquer
+aplicação CommonJS. A aplicação pode ser CommonJS ou ESM.
+
 ### 3. Uma linha no `app.module.ts`
 
 ```ts
