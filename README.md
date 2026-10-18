@@ -81,11 +81,16 @@ sem mostrar valor nenhum.
 | Decorator | Efeito |
 |---|---|
 | `@SsoPublic()` | ignora sessão e RBAC. É o nível do health check |
+| `@SsoOptional()` | rota pública que reconhece quem entrou: com sessão ou Bearer, preenche `@CurrentUser()`; sem credencial, ou com a sessão morta, segue sem usuário e nunca manda ao login |
 | `@SsoAuthenticated()` | exige sessão, dispensa a permissão por rota |
 | _(nenhum)_ | exige sessão **e** permissão. Sem ela, o mesmo 404 de uma rota que não existe |
-| `@CurrentUser()` | injeta a identidade no handler |
+| `@CurrentUser()` | injeta a identidade no handler. Em rota opcional, `undefined` quando ninguém entrou |
 | `@CurrentToken()` | injeta o access token verificado, para repassar adiante |
 | `@SsoFreshGrant()` | pergunta ao SSO em toda chamada, sem esperar a janela. `/auth/me` e `/auth/token` já usam |
+
+Na rota opcional, Bearer inválido continua `401` com `invalid_token`, e escrita com sessão continua
+exigindo o `X-CSRF-Token`. Entre handler e classe vence o nível mais aberto: `@SsoOptional()` na classe
+abre também o handler marcado `@SsoAuthenticated()`.
 
 O que muda no console do SSO vale na API em até 30 segundos, sem novo login. O guard pergunta ao SSO
 (introspecção, RFC 7662) se o grant do token vale e qual é o papel de agora: papel trocado decide a

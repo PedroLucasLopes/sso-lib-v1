@@ -17,6 +17,7 @@ import {
   SSO_FRESH_GRANT,
   SSO_LEVEL_AUTHENTICATED,
   SSO_LEVEL_LOGIN,
+  SSO_LEVEL_OPTIONAL,
   SSO_LEVEL_PUBLIC,
   SSO_SAFE_METHODS,
 } from '../ssoClient.constant';
@@ -70,6 +71,57 @@ export class SsoRbacGuard implements CanActivate {
 
     const bearer = this.readBearer(req);
 
+    if (this.hasLevel(context, SSO_LEVEL_OPTIONAL)) {
+      return this.identifyIfPresent(context, req, res, bearer);
+    }
+
+    const { user, roles, perm } = await this.identify(context, req, res, bearer);
+
+    if (this.hasLevel(context, SSO_LEVEL_AUTHENTICATED)) return true;
+
+    const path = this.normalize(req.path);
+    const method = req.method.toUpperCase();
+
+    if (this.isAllowed(user.permissions, path, method)) return true;
+
+    user.permissions = roles.length
+      ? await this.permissions.forRoles(roles, perm, { revalidate: true })
+      : [];
+
+    if (this.isAllowed(user.permissions, path, method)) return true;
+
+    this.logger.warn(`negado: ${roles.join(', ') || 'sem papel'} em ${method} ${path}`);
+
+    throw new NotFoundException(`Cannot ${req.method} ${req.originalUrl}`);
+  }
+
+  private async identifyIfPresent(
+    context: ExecutionContext,
+    req: Request,
+    res: Response,
+    bearer: string | null,
+  ): Promise<boolean> {
+    if (!bearer && !this.sessions.read(req)) return true;
+
+    try {
+      await this.identify(context, req, res, bearer);
+    } catch (error) {
+      if (!(error instanceof SsoLoginRequiredException)) throw error;
+
+      this.logger.log(
+        `sessao encerrada em ${req.method} ${req.path}, rota opcional: segue sem usuario (${error.reason})`,
+      );
+    }
+
+    return true;
+  }
+
+  private async identify(
+    context: ExecutionContext,
+    req: Request,
+    res: Response,
+    bearer: string | null,
+  ): Promise<{ user: SsoUser; roles: string[]; perm: string }> {
     if (!bearer) this.assertCsrf(req);
 
     let accessToken = bearer ?? (await this.fromSession(req, res));
@@ -182,22 +234,7 @@ export class SsoRbacGuard implements CanActivate {
     request.ssoUser = user;
     request.ssoAccessToken = accessToken;
 
-    if (this.hasLevel(context, SSO_LEVEL_AUTHENTICATED)) return true;
-
-    const path = this.normalize(req.path);
-    const method = req.method.toUpperCase();
-
-    if (this.isAllowed(user.permissions, path, method)) return true;
-
-    user.permissions = roles.length
-      ? await this.permissions.forRoles(roles, perm, { revalidate: true })
-      : [];
-
-    if (this.isAllowed(user.permissions, path, method)) return true;
-
-    this.logger.warn(`negado: ${roles.join(', ') || 'sem papel'} em ${method} ${path}`);
-
-    throw new NotFoundException(`Cannot ${req.method} ${req.originalUrl}`);
+    return { user, roles, perm };
   }
 
   private assertCsrf(req: Request): void {

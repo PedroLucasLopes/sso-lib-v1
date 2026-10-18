@@ -365,10 +365,42 @@ sessão continua 401, porque a pessoa precisa saber que tem de entrar.
 |---|---|
 | `@SsoPublic()` | ignora sessão e RBAC. É o nível do health check |
 | `@SsoLogin()` | rota do fluxo de login, onde ainda não há sessão |
+| `@SsoOptional()` | lê a sessão ou o Bearer quando houver e preenche `@CurrentUser()`; sem credencial, segue sem usuário. Nunca manda ao login. É o nível da página pública que quer saber quem entrou |
 | `@SsoAuthenticated()` | exige sessão válida, dispensa a checagem de permissão por rota |
 | _(nenhum)_ | exige sessão **e** permissão do papel para a rota. Sem ela, 404 |
 | `@CurrentUser()` | injeta a identidade resolvida no handler |
 | `@CurrentToken()` | injeta o access token já verificado, para repassar adiante |
+
+### 👤 `@SsoOptional()`: página pública que sabe quem entrou
+
+`@SsoPublic()` retorna antes de ler qualquer coisa, e é o certo para o health check. Uma página pública
+de produto, como busca, mapa ou orçamento, quer outra coisa: atender quem não entrou e, se alguém
+entrou, saber quem é, sem nunca mandar ninguém ao login.
+
+| Chegou | O guard faz |
+|---|---|
+| nada: sem `Authorization: Bearer` e sem cookie de sessão legível | segue sem usuário. Não fala com o SSO e não escreve cookie |
+| sessão viva | o mesmo da rota autenticada: verificação, renovação silenciosa, introspecção, `Authorization` hidratado e `@CurrentUser()` preenchido. Sem RBAC por rota, como em `@SsoAuthenticated()` |
+| sessão morta: renovação recusada, grant inativo, token renovado que não verifica | apaga o cookie e segue sem usuário. Nunca `login_required` |
+| `Authorization: Bearer` válido | a identidade do token, como na rota autenticada |
+| `Authorization: Bearer` inválido ou revogado | `401` com `error: "invalid_token"`, como sempre |
+| escrita (`POST`, `PUT`, `PATCH`, `DELETE`) com sessão | exige o `X-CSRF-Token` e recusa `Origin` de outro site, como sempre |
+
+Quando ninguém entrou, o handler recebe `undefined` em `@CurrentUser()` e em `@CurrentToken()`.
+
+**Sessão morta vira visitante; Bearer inválido, não.** O cookie vai sozinho em toda requisição, sem o
+front pedir, e uma página pública que respondesse 401 por causa dele mandaria ao login quem só queria
+olhar. O Bearer é explícito: quem mandou um token ruim errou, e precisa saber.
+
+**O CSRF continua.** Numa rota opcional, uma escrita forjada com o cookie da vítima agiria em nome dela,
+por exemplo salvando um rascunho na conta dela. Sem cookie, a escrita é anônima e não há sessão para
+forjar, então passa sem o header.
+
+**O nível mais aberto vence**, entre o do handler e o da classe, nesta ordem: `@SsoPublic()`,
+`@SsoLogin()`, `@SsoOptional()`, `@SsoAuthenticated()`. `@SsoOptional()` na classe abre também o handler
+marcado `@SsoAuthenticated()`: para exigir sessão num handler, a classe dele não pode ser opcional.
+
+Há teste de regressão em `krloc/test/sso-e2e.js`, pela rota `/api/visitor`, em `GET` e `POST`.
 
 ---
 
@@ -562,6 +594,12 @@ linha, que sobrevive mal a uma variável de ambiente.
 - O caminho da requisição é sempre texto testado, nunca padrão.
 - Algoritmo de assinatura é allowlist fechada, nunca lido do token.
 - Rota sem decorator nega. Não inverta esse padrão.
+- Rota `@SsoOptional()` nunca devolve `login_required`. Sem credencial, segue sem usuário e sem falar
+  com o SSO; com sessão morta, apaga o cookie e segue sem usuário. Bearer inválido continua `401`
+  `invalid_token`, e escrita com sessão continua exigindo o `X-CSRF-Token`.
+- Entre handler e classe, vence o nível mais aberto: `@SsoPublic()`, `@SsoLogin()`, `@SsoOptional()`,
+  `@SsoAuthenticated()`. Mudar essa ordem abre ou fecha rota de quem já instalou, e pede `major`.
+- Nível de acesso novo é `minor`: rota que não o usa não muda de comportamento.
 - Rota negada devolve o 404 do roteador, `Cannot <MÉTODO> <URL>`, sem `WWW-Authenticate`. Um 403 ali
   revelaria que a rota existe.
 - As outras recusas do guard saem com código no campo `error`: `login_required`, `invalid_token`,
