@@ -5,7 +5,7 @@ import type { SsoClientOptions } from '../config/ssoClientOptions';
 import type { AccessTokenClaims } from '../dto/ssoSession.dto';
 import { SsoDiscoveryService } from './discovery.service';
 
-type Jwk = crypto.JsonWebKey & {
+type Jwk = crypto.webcrypto.JsonWebKey & {
   kid?: string;
   alg?: string;
   use?: string;
