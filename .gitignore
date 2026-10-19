@@ -3,6 +3,7 @@ dist/
 coverage/
 *.tsbuildinfo
 *.log
+*.tgz
 
 # Segredos. O token de publicacao vem do GitHub Actions, nunca de arquivo.
 .env

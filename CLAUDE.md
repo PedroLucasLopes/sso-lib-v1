@@ -81,16 +81,58 @@ níveis, o decorator na classe (`Reflector.getAllAndOverride`), `@CurrentUser()`
 (`createParamDecorator`), o filtro do `login_required`, os corpos de `invalid_token`,
 `csrf_token_invalid` e `origin_not_allowed`, o 404 da rota negada igual ao do roteador campo a campo, o
 login completo, a introspecção, a renovação silenciosa e o logout. O `test:sso` do krloc prova só a
-linha em que o krloc está; antes de aceitar uma linha nova do Nest, repita essa conferência.
+linha em que o krloc está; antes de aceitar uma linha nova do Nest, repita essa conferência. A parte
+que dispensa o SSO passou a rodar no CI, no job `nest12`.
 
 ### CI
 
-`.github/workflows/ci.yml` roda em pull request e push na `main`: `npm ci`, `npm audit` (produção sem
-aviso nenhum; o resto, sem alto), `lint:check` (o lint sem `--fix`), build e `npm pack --dry-run`, que
-mostra o que o pacote leva. O `publish.yml` repete auditoria e lint antes de publicar. As actions dos dois
-são fixadas por commit, cada job pede só a permissão que usa, e o Dependabot
-(`.github/dependabot.yml`) abre pull request para as actions e o npm toda semana. O teste de verdade da
-biblioteca continua sendo o `test:sso` do `krloc-api-v1`, contra um SSO de pé.
+`.github/workflows/ci.yml` roda em pull request e push na `main`, em dois jobs paralelos. O
+`publish.yml` repete auditoria e lint antes de publicar. As actions dos dois são fixadas por commit, cada
+job pede só a permissão que usa, e o Dependabot (`.github/dependabot.yml`) abre pull request para as
+actions e o npm toda semana.
+
+- **`check`**: `npm ci`, `npm audit` (produção sem aviso nenhum; o resto, sem alto), `lint:check` (o lint
+  sem `--fix`), build e `npm pack --dry-run`, que mostra o que o pacote leva.
+- **`nest12`**: compila, empacota com `npm pack` e instala o `.tgz` em `test/nest12`, uma aplicação
+  CommonJS no Nest 12, com `@nestjs/config` 12 e TypeScript 6 em `nodenext` e `skipLibCheck: false`.
+  Confere os tipos, sobe a aplicação com `SsoClientModule.forRoot`, um issuer fictício e uma chave RSA
+  gerada na hora, e roda um smoke que não precisa de SSO: `req.cookies` lido numa rota `@SsoPublic()` (o
+  `cookie-parser` em `{*splat}`); `@SsoOptional()` sem credencial, com 200, sem usuário e sem
+  `Set-Cookie`; Bearer malformado na rota opcional, com 401 `invalid_token`; `@SsoAuthenticated()` sem
+  credencial, com 401 `login_required` na chamada de API e 302 para `/auth/login` na navegação
+  (`Sec-Fetch-Dest: document`); e `@SsoOptional()` na classe.
+
+O que cada linha do Nest tem de prova:
+
+| Linha | O CI prova | O resto |
+|---|---|---|
+| 11 | o código da biblioteca contra os tipos do 11, que são as `devDependencies`: lint e build. Nada sobe no 11 | o `test:sso` do krloc, que está no 11, exercita a biblioteca inteira contra um SSO de pé |
+| 12 | o pacote como a API o recebe: o npm aceita o par, os `.d.ts` batem com os tipos do 12, o boot e o smoke | login, renovação, introspecção, CSRF com sessão, o 404 da rota negada, logout e aplicação ESM: só a conferência à mão da `0.6.0` |
+
+**Por que o pacote e `skipLibCheck: false`.** Uma API no 12 não recebe o código-fonte: recebe o `dist` e
+os `.d.ts`, compilados contra os tipos do 11. Com `skipLibCheck: true`, um `.d.ts` que citasse tipo que o
+12 tirou passaria calado aqui e estouraria na API que confere os tipos das bibliotecas. Cada checagem foi
+conferida quebrando a biblioteca de propósito, uma quebra por vez, na mesma sequência do job, e todas
+falharam onde deviam: peer só no 11 (o npm recusa o par), `cookie-parser` fora do `{*splat}`, decorator
+da classe ignorado, `Set-Cookie` na rota opcional sem credencial, navegação sem o 302 e um `.d.ts` com
+tipo que o 12 não exporta.
+
+**As versões do `test/nest12` ficam no `package-lock.json` dele.** O Dependabot as sobe dentro da
+linha (Nest 12, TypeScript 6 e `@types/node` 22, o Node do job), agrupadas num pull request, e major
+fica de fora: linha nova do Nest é decisão, não atualização. A biblioteca entra por
+`npm install --no-save` e não vai para o lock, porque o hash do `.tgz` muda a cada build. `test/` não
+entra no pacote, que leva só `dist`.
+
+Na máquina, com Node 20.19+ ou 22.12+:
+
+```bash
+npm run build && npm pack --pack-destination test/nest12
+cd test/nest12 && npm ci && npm install --no-save ./pedrolucaslopes-sso-client-*.tgz
+npm run build && npm run smoke
+```
+
+O `.tgz` fica fora do git. Depois de trocar a versão, apague o antigo: com dois na pasta, o `npm install`
+recebe os dois.
 
 ---
 
@@ -661,6 +703,8 @@ linha, que sobrevive mal a uma variável de ambiente.
 - O peer do Nest aceita o 11 e o 12, e as `devDependencies` ficam na linha mais antiga. Linha nova só
   entra na faixa depois de conferida numa aplicação naquela linha, porque o `test:sso` prova só a do
   krloc. Tirar uma linha da faixa pede `major`.
+- Cada linha do Nest acima da mais antiga tem a sua aplicação em `test/` e o seu job no CI, como o
+  `test/nest12`, com `skipLibCheck: false`. Ligar o `skipLibCheck` ali esconde o `.d.ts` que não bate.
 - Nome de variável lida por `forRootFromEnv` é contrato. Renomear, ou tornar obrigatória uma opcional,
   quebra quem já instalou e pede versão `major`.
 - Configuração incompleta cita nomes, nunca valores: metade das variáveis é segredo.

@@ -57,3 +57,45 @@ jobs:
       # O que o pacote leva: so `dist`, sem fonte, teste nem configuracao.
       - name: Conferir o conteudo do pacote
         run: npm pack --dry-run
+
+  nest12:
+    name: Pacote num app Nest 12
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            test/nest12/package-lock.json
+
+      - name: Instalar
+        run: npm ci
+
+      - run: npm run build
+
+      - name: Empacotar
+        run: npm pack --pack-destination test/nest12
+
+      - name: Instalar o pacote no app de teste
+        working-directory: test/nest12
+        run: |
+          npm ci
+          npm install --no-save ./pedrolucaslopes-sso-client-*.tgz
+          npm ls @nestjs/common @nestjs/core @nestjs/platform-express @nestjs/config @pedrolucaslopes/sso-client typescript
+
+      - name: Conferir os tipos com o TypeScript 6
+        working-directory: test/nest12
+        run: npm run build
+
+      - name: Subir o app e rodar o smoke
+        working-directory: test/nest12
+        run: npm run smoke
