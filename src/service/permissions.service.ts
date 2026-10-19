@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { SSO_CLIENT_OPTIONS } from '../ssoClient.constant';
 import type { SsoClientOptions } from '../config/ssoClientOptions';
 import type { SsoPermission } from '../dto/ssoSession.dto';
+import { SsoUnavailableException } from '../error/ssoUnavailable.exception';
 import {
   CLIENT_ASSERTION_TYPE,
   SsoClientAssertionService,
@@ -73,7 +74,17 @@ export class SsoPermissionsService {
     try {
       return await pending;
     } catch (error) {
-      if (!cached) throw error;
+      if (!cached) {
+        const detail = error instanceof Error ? error.message : String(error);
+
+        this.logger.warn(
+          `SSO indisponivel ao resolver o papel ${role}, sem conjunto conhecido: ${detail}`,
+        );
+
+        throw new SsoUnavailableException(
+          `papel ${role} sem conjunto conhecido: ${detail}`,
+        );
+      }
 
       this.logger.warn(
         `SSO indisponivel ao resolver o papel ${role}; mantido o ultimo conjunto conhecido`,

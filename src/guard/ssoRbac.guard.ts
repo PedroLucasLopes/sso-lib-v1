@@ -25,10 +25,12 @@ import type { SsoClientOptions } from '../config/ssoClientOptions';
 import type {
   AccessTokenClaims,
   SsoPermission,
+  SsoSessionData,
   SsoUser,
 } from '../dto/ssoSession.dto';
 import { SsoLoginRequiredException } from '../error/loginRequired.exception';
 import { isPageNavigation } from '../error/pageNavigation';
+import { SsoUnavailableException } from '../error/ssoUnavailable.exception';
 import {
   SsoIntrospectionService,
   type SsoGrantState,
@@ -106,6 +108,14 @@ export class SsoRbacGuard implements CanActivate {
     try {
       await this.identify(context, req, res, bearer);
     } catch (error) {
+      if (error instanceof SsoUnavailableException) {
+        this.logger.warn(
+          `SSO sem resposta em ${req.method} ${req.path}, rota opcional: segue sem usuario e a sessao fica (${error.reason})`,
+        );
+
+        return true;
+      }
+
       if (!(error instanceof SsoLoginRequiredException)) throw error;
 
       this.logger.log(
@@ -131,6 +141,8 @@ export class SsoRbacGuard implements CanActivate {
     try {
       claims = await this.verifier.verify(accessToken);
     } catch (firstError) {
+      if (firstError instanceof SsoUnavailableException) throw firstError;
+
       this.logger.warn(
         `access token recusado: ${firstError instanceof Error ? firstError.message : String(firstError)}`,
       );
@@ -155,7 +167,9 @@ export class SsoRbacGuard implements CanActivate {
       try {
         claims = await this.verifier.verify(renewed.accessToken);
         accessToken = renewed.accessToken;
-      } catch {
+      } catch (secondError) {
+        if (secondError instanceof SsoUnavailableException) throw secondError;
+
         this.sessions.clear(res);
         this.loginRequired(req, 'nem o token renovado verifica');
       }
@@ -364,9 +378,17 @@ export class SsoRbacGuard implements CanActivate {
 
     if (!stored) return null;
 
-    const renewed = await this.oauth.forceRefresh(stored, res, {
-      clearOnFailure: false,
-    });
+    let renewed: SsoSessionData | null;
+
+    try {
+      renewed = await this.oauth.forceRefresh(stored, res, {
+        clearOnFailure: false,
+      });
+    } catch (error) {
+      if (error instanceof SsoUnavailableException) return null;
+
+      throw error;
+    }
 
     if (!renewed) return null;
 

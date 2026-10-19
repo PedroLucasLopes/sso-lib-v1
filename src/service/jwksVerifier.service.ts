@@ -3,6 +3,7 @@ import * as crypto from 'node:crypto';
 import { SSO_CLIENT_OPTIONS } from '../ssoClient.constant';
 import type { SsoClientOptions } from '../config/ssoClientOptions';
 import type { AccessTokenClaims } from '../dto/ssoSession.dto';
+import { SsoUnavailableException } from '../error/ssoUnavailable.exception';
 import { SsoDiscoveryService } from './discovery.service';
 
 type Jwk = crypto.JsonWebKey & {
@@ -98,14 +99,31 @@ export class SsoJwksVerifierService {
   }
 
   private async refreshKeys(): Promise<void> {
-    const { jwks_uri: jwksUri } = await this.discovery.metadata();
-    const res = await fetch(jwksUri);
+    let keys: Jwk[];
 
-    if (!res.ok) {
-      throw new Error(`JWKS indisponivel: HTTP ${res.status}`);
+    try {
+      const { jwks_uri: jwksUri } = await this.discovery.metadata();
+      const res = await fetch(jwksUri);
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      const body = (await res.json()) as { keys?: unknown } | null;
+
+      if (!Array.isArray(body?.keys)) {
+        throw new Error('resposta sem a lista keys');
+      }
+
+      keys = body.keys as Jwk[];
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+
+      this.logger.warn(`JWKS do SSO indisponivel: ${detail}`);
+
+      throw new SsoUnavailableException(`JWKS indisponivel: ${detail}`);
     }
 
-    const { keys } = (await res.json()) as { keys: Jwk[] };
     const next = new Map<string, crypto.KeyObject>();
 
     for (const jwk of keys) {

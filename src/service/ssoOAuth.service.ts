@@ -23,6 +23,7 @@ import type {
 import { SsoLoginFailedException } from '../error/loginFailed.exception';
 import type { SsoLoginErrorCode } from '../error/loginFailed.exception';
 import { isPageNavigation } from '../error/pageNavigation';
+import { SsoUnavailableException } from '../error/ssoUnavailable.exception';
 import {
   CLIENT_ASSERTION_TYPE,
   SsoClientAssertionService,
@@ -31,6 +32,8 @@ import { SsoDiscoveryService } from './discovery.service';
 import { SsoSessionService } from './ssoSession.service';
 
 const RENEWAL_REUSE_MS = 30_000;
+
+const RETRYABLE_STATUSES = [408, 429];
 
 @Injectable()
 export class SsoOAuthService {
@@ -191,9 +194,7 @@ export class SsoOAuthService {
       return this.loginFailed(
         req,
         res,
-        error instanceof UnauthorizedException
-          ? 'login_failed'
-          : 'sso_unavailable',
+        this.refused(error) ? 'login_failed' : 'sso_unavailable',
         `troca do code falhou: ${error instanceof Error ? error.message : String(error)}`,
         returnTo,
       );
@@ -343,19 +344,11 @@ export class SsoOAuthService {
     res: Response,
     options: { clearOnFailure?: boolean } = {},
   ): Promise<SsoSessionData | null> {
-    try {
-      const tokens = await this.renew(session.refreshToken);
+    const renewed = await this.renewSession(session, res, 'renovacao forcada');
 
-      return this.sessions.write(res, tokens, session.csrfToken);
-    } catch (error) {
-      this.logger.warn(
-        `renovacao forcada recusada pelo SSO: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    if (!renewed && options.clearOnFailure !== false) this.sessions.clear(res);
 
-      if (options.clearOnFailure !== false) this.sessions.clear(res);
-
-      return null;
-    }
+    return renewed;
   }
 
   async refreshIfNeeded(
@@ -369,17 +362,58 @@ export class SsoOAuthService {
     }
 
     try {
-      const tokens = await this.renew(session.refreshToken);
+      const renewed = await this.renewSession(session, res, 'renovacao');
 
-      return this.sessions.write(res, tokens, session.csrfToken);
+      if (!renewed) this.sessions.clear(res);
+
+      return renewed;
     } catch (error) {
+      if (
+        !(error instanceof SsoUnavailableException) ||
+        session.expiresAt <= now
+      ) {
+        throw error;
+      }
+
       this.logger.warn(
-        `renovacao recusada pelo SSO: ${error instanceof Error ? error.message : String(error)}`,
+        `segue o access token atual, que vale por mais ${session.expiresAt - now}s`,
       );
 
-      this.sessions.clear(res);
-      return null;
+      return session;
     }
+  }
+
+  private async renewSession(
+    session: SsoSessionData,
+    res: Response,
+    label: string,
+  ): Promise<SsoSessionData | null> {
+    let tokens: SsoTokenResponse;
+
+    try {
+      tokens = await this.renew(session.refreshToken);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+
+      if (this.refused(error)) {
+        this.logger.warn(`${label} recusada pelo SSO: ${detail}`);
+        return null;
+      }
+
+      this.logger.warn(
+        `${label} sem resposta do SSO, a sessao fica: ${detail}`,
+      );
+
+      throw new SsoUnavailableException(
+        `${label} sem resposta do SSO: ${detail}`,
+      );
+    }
+
+    return this.sessions.write(res, tokens, session.csrfToken);
+  }
+
+  private refused(error: unknown): boolean {
+    return error instanceof UnauthorizedException;
   }
 
   async currentAccessToken(
@@ -465,17 +499,17 @@ export class SsoOAuthService {
       | (SsoTokenResponse & Partial<SsoTokenError>)
       | null;
 
-    if (!res.ok || !body) {
+    if (!res.ok) {
       const detail = body?.error
         ? `${body.error}: ${body.error_description ?? ''}`.trim()
         : `HTTP ${res.status}`;
 
-      throw res.status >= 500
+      throw res.status >= 500 || RETRYABLE_STATUSES.includes(res.status)
         ? new BadGatewayException(`SSO indisponivel (${detail})`)
         : new UnauthorizedException(`SSO recusou a troca (${detail})`);
     }
 
-    if (!body.access_token || !body.refresh_token) {
+    if (!body?.access_token || !body.refresh_token) {
       throw new BadGatewayException('resposta do SSO sem os tokens esperados');
     }
 

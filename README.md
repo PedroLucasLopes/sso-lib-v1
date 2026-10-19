@@ -93,13 +93,15 @@ sem mostrar valor nenhum.
 | `@SsoFreshGrant()` | pergunta ao SSO em toda chamada, sem esperar a janela. `/auth/me` e `/auth/token` já usam |
 
 Na rota opcional, Bearer inválido continua `401` com `invalid_token`, e escrita com sessão continua
-exigindo o `X-CSRF-Token`. Entre handler e classe vence o nível mais aberto: `@SsoOptional()` na classe
-abre também o handler marcado `@SsoAuthenticated()`.
+exigindo o `X-CSRF-Token`. Com o SSO fora do ar, ela segue sem usuário e não apaga o cookie. Entre
+handler e classe vence o nível mais aberto: `@SsoOptional()` na classe abre também o handler marcado
+`@SsoAuthenticated()`.
 
 O que muda no console do SSO vale na API em até 30 segundos, sem novo login. O guard pergunta ao SSO
 (introspecção, RFC 7662) se o grant do token vale e qual é o papel de agora: papel trocado decide a
 requisição pelo novo e renova o token na mesma resposta; pessoa tirada do projeto, aplicação suspensa
-e logout derrubam a sessão. SSO fora do ar mantém o último estado conhecido.
+e logout derrubam a sessão. SSO fora do ar mantém o último estado conhecido e **nunca derruba a
+sessão**: só a recusa do SSO derruba, e a falta de resposta vira `503` com `sso_unavailable`.
 
 ## O que o front precisa fazer
 
@@ -131,8 +133,14 @@ pela frase em `message`:
 | `invalid_token` | 401 | `Authorization: Bearer` que não verifica ou foi revogado no SSO |
 | `csrf_token_invalid` | 403 | escrita por cookie sem o `X-CSRF-Token`, ou com ele errado |
 | `origin_not_allowed` | 403 | escrita por cookie vinda de outro site |
+| `sso_unavailable` | 503 | o SSO não respondeu, e a sessão ou o Bearer não pôde ser renovado nem conferido. A sessão continua: não mande ao login, tente de novo |
 
 Rota que o papel não alcança responde o 404 do roteador, sem código, igual a caminho que não existe.
+
+Com o SSO fora do ar, a sessão **não** cai. A chamada que precisava dele volta `503` com
+`sso_unavailable`, e o front mantém a tela, avisa que não deu para confirmar a sessão e tenta de novo
+depois. Mandar ao login não adianta: o login também passa pelo SSO. Com o SSO de volta, a mesma sessão
+renova sozinha.
 
 Para o menu acompanhar uma troca de papel sem recarregar, o front relê `GET /auth/me` de tempos em
 tempos e na volta à aba. Os fronts do ecossistema fazem a cada 30 segundos.

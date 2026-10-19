@@ -129,12 +129,14 @@ O fluxo, do jeito que ele de fato acontece:
 access token válido            -> segue
 access token perto de vencer   -> renova em silêncio, na própria requisição
 access token não verifica      -> tenta renovar mesmo assim, e só então desiste
+SSO sem resposta               -> a sessão fica: 503 sso_unavailable, ninguém vai ao login
 refresh token morto            -> aí sim, login
 ```
 
 A terceira linha é a que menos se espera e a que mais salva. Um access token pode deixar de
 verificar sem a sessão estar ruim: rotação de chave de assinatura no SSO, relógio fora de hora. Sem
-a tentativa de renovação, uma rotação de chave deslogaria todo mundo ao mesmo tempo.
+a tentativa de renovação, uma rotação de chave deslogaria todo mundo ao mesmo tempo. A quarta tem
+seção própria, logo abaixo: só recusa do SSO derruba sessão.
 
 **Quatro prazos precisam estar alinhados, e o menor deles é quem manda:**
 
@@ -208,6 +210,58 @@ o parâmetro: `safeReturnTo` valida do mesmo jeito.
 **O guard não chama `res.redirect()`.** Ele lança. Um guard que responde e devolve `false` faz o Nest
 tentar responder de novo, e o resultado é "Cannot set headers after they are sent". Já aconteceu
 neste projeto, e é por isso que a decisão mora num filtro.
+
+### 🌩️ SSO sem resposta não derruba a sessão
+
+O access token dura 15 minutos, então toda sessão em uso pede renovação ao SSO a cada 15 minutos.
+Antes, qualquer falha nessa renovação apagava o cookie. Com o SSO fora do ar, quem precisasse renovar
+ia ao login, ou virava visitante na rota opcional, e com o SSO de volta tinha de entrar de novo, com o
+refresh token ainda válido. Uma queda de dez minutos deslogava, aos poucos, todo mundo que usou a
+aplicação nesse intervalo.
+
+A biblioteca separa **recusa** de **falta de resposta**, e só a recusa derruba a sessão:
+
+| O SSO | Quando | A sessão |
+|---|---|---|
+| **recusou** | a renovação deu 4xx, menos 408 e 429: `invalid_grant` (refresh token revogado, expirado ou reusado), `invalid_client` (aplicação suspensa, chave revogada). Também grant inativo na introspecção e token renovado que não verifica | cai: cookie apagado e `login_required`, ou visitante na rota opcional |
+| **não respondeu** | falha de rede, discovery que não carrega, 5xx, 408, 429, resposta sem os tokens, JWKS que não carrega, papel sem conjunto de permissões conhecido nesta instância | fica: o cookie não é tocado |
+
+O que a requisição recebe quando o SSO não responde depende do que ainda dá para saber sem ele:
+
+| Situação | Resposta |
+|---|---|
+| access token perto de vencer, mas ainda válido | segue com ele; a renovação fica para a requisição seguinte |
+| access token vencido, ou que esta instância não consegue conferir porque nunca carregou o JWKS | `503` com `error: "sso_unavailable"`, também para navegação de página. Na rota `@SsoOptional()`, segue sem usuário |
+| `Authorization: Bearer` que não dá para conferir | o mesmo `503 sso_unavailable`, e não `invalid_token`. Na rota opcional, sem usuário |
+
+**Por que `503` e não `login_required`.** Mandar ao login não resolve: o login também passa pelo SSO, e
+a pessoa trocaria a tela em que estava por uma página de erro. O `503` diz ao front que a sessão
+continua e que basta tentar de novo. `invalid_token` também seria falso: o token pode estar bom, quem
+não consegue conferi-lo é a aplicação.
+
+**Por que o access token vencido não vale "só até o SSO voltar".** Aceitá-lo estenderia, sem prazo,
+uma sessão que o SSO pode ter revogado durante a queda. O que a queda preserva é o direito de renovar,
+não o acesso.
+
+**Por que 408 e 429 contam como falta de resposta.** O SSO limita `POST /oauth/token` a 120 chamadas
+por minuto por IP, e todas as renovações e trocas de code de uma instância saem do mesmo IP. Com o 429
+tratado como recusa, um pico de uso, ou alguém repetindo logins de propósito, apagava a sessão de quem
+renovasse naquele minuto. O resto dos 4xx continua recusa, de propósito: recusa tratada como falta de
+resposta prenderia a pessoa num `503` para sempre, sem nunca mandá-la ao login.
+
+**A rota opcional segue sem usuário, inclusive na escrita.** A página pública continua de pé com o SSO
+fora, que é para isso que ela é opcional. Escrita com cookie continua exigindo o `X-CSRF-Token`, e com
+ele segue anônima. Quem precisa saber se a pessoa entrou relê `GET /auth/me`, que responde
+`503 sso_unavailable` até o SSO voltar.
+
+**O contrato de quem chama o serviço direto.** `refreshIfNeeded` e `forceRefresh` devolvem `null` só na
+recusa, e aí já apagaram o cookie. Quando o SSO não responde, lançam `SsoUnavailableException`,
+exportada, com o motivo em `reason`, que vai para o log e nunca para a resposta: ele pode levar o
+endereço interno do SSO.
+
+Com o SSO de volta, a mesma sessão renova na requisição seguinte, sem login. Há teste de regressão em
+`krloc/test/sso-e2e.js`: uma segunda instância do krloc, com `SSO_INTERNAL_URL` numa porta fechada,
+recebe a sessão e o Bearer da primeira (`APP_TEST_SSO_DOWN_BASE_URL`).
 
 ### 🛡️ CSRF: o preço de autenticar por cookie
 
@@ -320,8 +374,8 @@ O critério de navegação é o mesmo `isPageNavigation` do `login_required`, e 
 | `access_denied` | o SSO respondeu `access_denied`: a conta não tem papel no projeto |
 | `login_expired` | não chegou transação legível, ou ela tem mais de 5 minutos |
 | `state_mismatch` | `state` ausente ou de outra transação, como num login aberto em outra aba |
-| `sso_unavailable` | o SSO respondeu `server_error` ou `temporarily_unavailable`, ou a troca do code deu 5xx, falha de rede ou de discovery |
-| `login_failed` | o resto: outro erro do SSO, `iss` de outro servidor, resposta sem `code`, troca recusada com 4xx (`invalid_grant`, `invalid_client`) |
+| `sso_unavailable` | o SSO respondeu `server_error` ou `temporarily_unavailable`, ou a troca do code deu 5xx, 408, 429, resposta sem os tokens, falha de rede ou de discovery |
+| `login_failed` | o resto: outro erro do SSO, `iss` de outro servidor, resposta sem `code`, troca recusada com 4xx (`invalid_grant`, `invalid_client`), menos 408 e 429 |
 
 **A lista é fechada, e na URL só vai o código.** O `error_description` e o `iss` que chegaram pela URL
 vão para o log, escapados com `JSON.stringify`, nunca para a resposta. É a regra da tela de login do
@@ -405,6 +459,7 @@ entrou, saber quem é, sem nunca mandar ninguém ao login.
 | nada: sem `Authorization: Bearer` e sem cookie de sessão legível | segue sem usuário. Não fala com o SSO e não escreve cookie |
 | sessão viva | o mesmo da rota autenticada: verificação, renovação silenciosa, introspecção, `Authorization` hidratado e `@CurrentUser()` preenchido. Sem RBAC por rota, como em `@SsoAuthenticated()` |
 | sessão morta: renovação recusada, grant inativo, token renovado que não verifica | apaga o cookie e segue sem usuário. Nunca `login_required` |
+| SSO sem resposta, com sessão ou Bearer que não dá para confirmar | segue sem usuário e não toca no cookie. Nunca `503` |
 | `Authorization: Bearer` válido | a identidade do token, como na rota autenticada |
 | `Authorization: Bearer` inválido ou revogado | `401` com `error: "invalid_token"`, como sempre |
 | escrita (`POST`, `PUT`, `PATCH`, `DELETE`) com sessão | exige o `X-CSRF-Token` e recusa `Origin` de outro site, como sempre |
@@ -413,7 +468,9 @@ Quando ninguém entrou, o handler recebe `undefined` em `@CurrentUser()` e em `@
 
 **Sessão morta vira visitante; Bearer inválido, não.** O cookie vai sozinho em toda requisição, sem o
 front pedir, e uma página pública que respondesse 401 por causa dele mandaria ao login quem só queria
-olhar. O Bearer é explícito: quem mandou um token ruim errou, e precisa saber.
+olhar. O Bearer é explícito: quem mandou um token ruim errou, e precisa saber. Com o SSO sem resposta,
+ninguém errou, e os dois seguem sem usuário: a página pública não cai junto com o SSO. Ver "SSO sem
+resposta não derruba a sessão".
 
 **O CSRF continua.** Numa rota opcional, uma escrita forjada com o cookie da vítima agiria em nome dela,
 por exemplo salvando um rascunho na conta dela. Sem cookie, a escrita é anônima e não há sessão para
@@ -461,7 +518,7 @@ src/
 ├─ cookie/                  # AEAD (AES-256-GCM) + cookie cifrado e cookie legível
 ├─ decorator/               # níveis de acesso + @CurrentUser
 ├─ dto/                     # tipos de sessão, claims, metadados do AS
-├─ error/                   # login_required e login recusado: exceções, filtro, isPageNavigation
+├─ error/                   # login_required, login recusado e SSO sem resposta: exceções, filtro, isPageNavigation
 ├─ testing/                 # ponto de entrada @pedrolucaslopes/sso-client/testing
 ├─ guard/                   # SsoRbacGuard
 └─ service/                 # discovery · jwks · client assertion · oauth · sessão
@@ -518,7 +575,9 @@ Só o hash não bastava. Ele muda dentro do token apenas quando o token é renov
 15 minutos: uma revogação feita no console continuava valendo esse tempo todo. O papel tinha o mesmo
 problema, e pior: ele está **escrito** no token, e a troca de papel só pesava na renovação seguinte. **Com o SSO fora do
 ar**, o último conjunto conhecido segue valendo até ele voltar. A janela é curta por construção: sem
-o SSO nenhum token se renova, e o access token dura 15 minutos.
+o SSO nenhum token se renova, e o access token dura 15 minutos. Papel que esta instância nunca resolveu
+não tem último conjunto, e aí a resposta é `503 sso_unavailable`, ou visitante na rota opcional. Antes
+era um 500 sem código.
 
 **Papel que o SSO não conhece mais**, apagado ou renomeado, não é SSO fora do ar: o
 `POST /oauth/permissions` responde 404 e o conjunto vira vazio. Nada fica liberado até o token renovar
@@ -618,22 +677,32 @@ linha, que sobrevive mal a uma variável de ambiente.
 - Algoritmo de assinatura é allowlist fechada, nunca lido do token.
 - Rota sem decorator nega. Não inverta esse padrão.
 - Rota `@SsoOptional()` nunca devolve `login_required`. Sem credencial, segue sem usuário e sem falar
-  com o SSO; com sessão morta, apaga o cookie e segue sem usuário. Bearer inválido continua `401`
-  `invalid_token`, e escrita com sessão continua exigindo o `X-CSRF-Token`.
+  com o SSO; com sessão morta, apaga o cookie e segue sem usuário; com o SSO sem resposta, segue sem
+  usuário e não toca no cookie. Bearer inválido continua `401` `invalid_token`, e escrita com sessão
+  continua exigindo o `X-CSRF-Token`.
 - Entre handler e classe, vence o nível mais aberto: `@SsoPublic()`, `@SsoLogin()`, `@SsoOptional()`,
   `@SsoAuthenticated()`. Mudar essa ordem abre ou fecha rota de quem já instalou, e pede `major`.
 - Nível de acesso novo é `minor`: rota que não o usa não muda de comportamento.
 - Rota negada devolve o 404 do roteador, `Cannot <MÉTODO> <URL>`, sem `WWW-Authenticate`. Um 403 ali
   revelaria que a rota existe.
 - As outras recusas do guard saem com código no campo `error`: `login_required`, `invalid_token`,
-  `csrf_token_invalid` e `origin_not_allowed`. Código é contrato com o front: renomear um pede `major`.
-  O 404 de rota negada fica sem código, para continuar igual ao do roteador.
+  `csrf_token_invalid` e `origin_not_allowed`, e o SSO sem resposta sai como `503` `sso_unavailable`.
+  Código é contrato com o front: renomear um pede `major`, e código novo é `minor`. O 404 de rota negada
+  fica sem código, para continuar igual ao do roteador.
 - Permissão concedida vale sem novo login, e a revogada, em até 60 segundos. Cache sem prazo volta a
   deixar uma revogação valendo até o token renovar.
 - Papel trocado, pessoa tirada do projeto, aplicação suspensa e grant revogado valem em até
   `grantCheckSeconds`. A introspecção decide pelo papel de agora e, pela sessão, renova o token na hora;
   inativo derruba a sessão. SSO sem `introspection_endpoint` desliga a checagem, e SSO fora do ar
   mantém o último estado: nunca derrube sessão por falta de resposta.
+- Só recusa do SSO derruba sessão: 4xx na renovação, menos 408 e 429, grant inativo e token renovado
+  que não verifica. Falta de resposta (rede, discovery, 5xx, 408, 429, resposta sem tokens, JWKS,
+  papel sem conjunto conhecido) nunca apaga o cookie: rota autenticada responde `503`
+  `sso_unavailable`, e a opcional segue sem usuário. Tratar falta de resposta como recusa desloga todo
+  mundo que renova durante a queda; tratar recusa como falta de resposta prende a pessoa num `503`.
+- Access token vencido nunca vale por falta de SSO. A queda preserva a sessão, não o acesso.
+- `refreshIfNeeded` e `forceRefresh` devolvem `null` só na recusa e lançam `SsoUnavailableException`
+  quando o SSO não responde. O `reason` dela vai para o log, nunca para a resposta.
 - `GET /auth/me` e `GET /auth/token` perguntam ao SSO a cada chamada (`@SsoFreshGrant()`).
 - Uma renovação por refresh token (`renew`), e quem lê a sessão depois de renovar lê a renovada
   (`sessions.remember`). Renovar duas vezes com o mesmo refresh token é reuso para o SSO, e a sessão
