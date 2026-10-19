@@ -60,6 +60,29 @@ publicada.
 
 **Não introduza dependência de nada fora de `sso-client/src`.** É o que mantém o pacote independente.
 
+### NestJS 11 e 12
+
+O `peerDependencies` aceita as duas linhas: `@nestjs/common` e `@nestjs/core` em `^11 || ^12`, e
+`@nestjs/config` em `^4 || ^12`, porque a 12 do config acompanha a numeração do core e aceita as duas. Sem
+isso, uma API no Nest 12 não instalava o pacote: o npm recusa o par.
+
+**O Nest 12 é só ESM, e esta biblioteca é CommonJS.** Funciona porque o Node carrega ESM por `require()`,
+sem flag a partir do 20.19 e do 22.12, e o próprio Nest 12 já exige isso de qualquer aplicação CommonJS:
+não é requisito novo. Também não há instância duplicada do Nest. O pacote do 12 só tem a cópia ESM, e o
+`require()` da biblioteca recebe o mesmo módulo que o `import` da aplicação.
+
+As `devDependencies` ficam no 11, a linha mais antiga aceita, para o build provar o 11 a cada pull
+request. Subi-las para o 12, como o Dependabot propõe, deixaria o 11 sem ninguém que o confira.
+
+O 12 foi conferido na `0.6.0` com o pacote do `npm pack` numa aplicação de teste no Nest 12.1.3, com
+`@nestjs/config` 12.0.1 e TypeScript 6 em `nodenext` com `skipLibCheck: false`, nas duas formas,
+CommonJS e ESM, contra o SSO de pé: o boot do módulo, o `cookie-parser` em `{*splat}`, todos os
+níveis, o decorator na classe (`Reflector.getAllAndOverride`), `@CurrentUser()` e `@CurrentToken()`
+(`createParamDecorator`), o filtro do `login_required`, os corpos de `invalid_token`,
+`csrf_token_invalid` e `origin_not_allowed`, o 404 da rota negada igual ao do roteador campo a campo, o
+login completo, a introspecção, a renovação silenciosa e o logout. O `test:sso` do krloc prova só a
+linha em que o krloc está; antes de aceitar uma linha nova do Nest, repita essa conferência.
+
 ### CI
 
 `.github/workflows/ci.yml` roda em pull request e push na `main`: `npm ci`, `npm audit` (produção sem
@@ -365,10 +388,42 @@ sessão continua 401, porque a pessoa precisa saber que tem de entrar.
 |---|---|
 | `@SsoPublic()` | ignora sessão e RBAC. É o nível do health check |
 | `@SsoLogin()` | rota do fluxo de login, onde ainda não há sessão |
+| `@SsoOptional()` | lê a sessão ou o Bearer quando houver e preenche `@CurrentUser()`; sem credencial, segue sem usuário. Nunca manda ao login. É o nível da página pública que quer saber quem entrou |
 | `@SsoAuthenticated()` | exige sessão válida, dispensa a checagem de permissão por rota |
 | _(nenhum)_ | exige sessão **e** permissão do papel para a rota. Sem ela, 404 |
 | `@CurrentUser()` | injeta a identidade resolvida no handler |
 | `@CurrentToken()` | injeta o access token já verificado, para repassar adiante |
+
+### 👤 `@SsoOptional()`: página pública que sabe quem entrou
+
+`@SsoPublic()` retorna antes de ler qualquer coisa, e é o certo para o health check. Uma página pública
+de produto, como busca, mapa ou orçamento, quer outra coisa: atender quem não entrou e, se alguém
+entrou, saber quem é, sem nunca mandar ninguém ao login.
+
+| Chegou | O guard faz |
+|---|---|
+| nada: sem `Authorization: Bearer` e sem cookie de sessão legível | segue sem usuário. Não fala com o SSO e não escreve cookie |
+| sessão viva | o mesmo da rota autenticada: verificação, renovação silenciosa, introspecção, `Authorization` hidratado e `@CurrentUser()` preenchido. Sem RBAC por rota, como em `@SsoAuthenticated()` |
+| sessão morta: renovação recusada, grant inativo, token renovado que não verifica | apaga o cookie e segue sem usuário. Nunca `login_required` |
+| `Authorization: Bearer` válido | a identidade do token, como na rota autenticada |
+| `Authorization: Bearer` inválido ou revogado | `401` com `error: "invalid_token"`, como sempre |
+| escrita (`POST`, `PUT`, `PATCH`, `DELETE`) com sessão | exige o `X-CSRF-Token` e recusa `Origin` de outro site, como sempre |
+
+Quando ninguém entrou, o handler recebe `undefined` em `@CurrentUser()` e em `@CurrentToken()`.
+
+**Sessão morta vira visitante; Bearer inválido, não.** O cookie vai sozinho em toda requisição, sem o
+front pedir, e uma página pública que respondesse 401 por causa dele mandaria ao login quem só queria
+olhar. O Bearer é explícito: quem mandou um token ruim errou, e precisa saber.
+
+**O CSRF continua.** Numa rota opcional, uma escrita forjada com o cookie da vítima agiria em nome dela,
+por exemplo salvando um rascunho na conta dela. Sem cookie, a escrita é anônima e não há sessão para
+forjar, então passa sem o header.
+
+**O nível mais aberto vence**, entre o do handler e o da classe, nesta ordem: `@SsoPublic()`,
+`@SsoLogin()`, `@SsoOptional()`, `@SsoAuthenticated()`. `@SsoOptional()` na classe abre também o handler
+marcado `@SsoAuthenticated()`: para exigir sessão num handler, a classe dele não pode ser opcional.
+
+Há teste de regressão em `krloc/test/sso-e2e.js`, pela rota `/api/visitor`, em `GET` e `POST`.
 
 ---
 
@@ -562,6 +617,12 @@ linha, que sobrevive mal a uma variável de ambiente.
 - O caminho da requisição é sempre texto testado, nunca padrão.
 - Algoritmo de assinatura é allowlist fechada, nunca lido do token.
 - Rota sem decorator nega. Não inverta esse padrão.
+- Rota `@SsoOptional()` nunca devolve `login_required`. Sem credencial, segue sem usuário e sem falar
+  com o SSO; com sessão morta, apaga o cookie e segue sem usuário. Bearer inválido continua `401`
+  `invalid_token`, e escrita com sessão continua exigindo o `X-CSRF-Token`.
+- Entre handler e classe, vence o nível mais aberto: `@SsoPublic()`, `@SsoLogin()`, `@SsoOptional()`,
+  `@SsoAuthenticated()`. Mudar essa ordem abre ou fecha rota de quem já instalou, e pede `major`.
+- Nível de acesso novo é `minor`: rota que não o usa não muda de comportamento.
 - Rota negada devolve o 404 do roteador, `Cannot <MÉTODO> <URL>`, sem `WWW-Authenticate`. Um 403 ali
   revelaria que a rota existe.
 - As outras recusas do guard saem com código no campo `error`: `login_required`, `invalid_token`,
@@ -597,6 +658,9 @@ linha, que sobrevive mal a uma variável de ambiente.
 - O que está em `testing/` exige credencial de operador do SSO e **nunca** sai do ponto de entrada
   separado. Não reexporte pelo `index.ts`.
 - Rode `npm run test:sso` no krloc depois de mexer aqui: é o teste que exercita a biblioteca inteira.
+- O peer do Nest aceita o 11 e o 12, e as `devDependencies` ficam na linha mais antiga. Linha nova só
+  entra na faixa depois de conferida numa aplicação naquela linha, porque o `test:sso` prova só a do
+  krloc. Tirar uma linha da faixa pede `major`.
 - Nome de variável lida por `forRootFromEnv` é contrato. Renomear, ou tornar obrigatória uma opcional,
   quebra quem já instalou e pede versão `major`.
 - Configuração incompleta cita nomes, nunca valores: metade das variáveis é segredo.

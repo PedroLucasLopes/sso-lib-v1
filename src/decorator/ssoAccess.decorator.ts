@@ -5,6 +5,7 @@ import {
   SSO_FRESH_GRANT,
   SSO_LEVEL_AUTHENTICATED,
   SSO_LEVEL_LOGIN,
+  SSO_LEVEL_OPTIONAL,
   SSO_LEVEL_PUBLIC,
 } from '../ssoClient.constant';
 import type { SsoUser } from '../dto/ssoSession.dto';
@@ -12,6 +13,8 @@ import type { SsoUser } from '../dto/ssoSession.dto';
 export const SsoPublic = () => SetMetadata(SSO_LEVEL_PUBLIC, true);
 
 export const SsoLogin = () => SetMetadata(SSO_LEVEL_LOGIN, true);
+
+export const SsoOptional = () => SetMetadata(SSO_LEVEL_OPTIONAL, true);
 
 export const SsoAuthenticated = () => SetMetadata(SSO_LEVEL_AUTHENTICATED, true);
 
