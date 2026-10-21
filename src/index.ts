@@ -3,6 +3,7 @@ export { SsoClientModule } from './ssoClient.module';
 export {
   SsoPublic,
   SsoLogin,
+  SsoOptional,
   SsoAuthenticated,
   SsoFreshGrant,
   CurrentUser,
