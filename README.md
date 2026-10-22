@@ -151,6 +151,27 @@ tempos e na volta à aba. Os fronts do ecossistema fazem a cada 30 segundos.
 preferir, e o resto continua vindo do ambiente. Para montar as opções de outro jeito, `forRoot` e
 `forRootAsync` continuam disponíveis, e `ssoClientOptionsFromEnv()` devolve o objeto sem registrar nada.
 
+## Contas que a pessoa excluiu
+
+Quem exclui a própria conta no SSO entra numa lista que cada aplicação em que a pessoa esteve lê
+quando quiser, para apagar os dados dela. O `SsoDeletedAccountsService`, injetável como os outros
+serviços do módulo, lê essa lista com a mesma asserção de cliente do token endpoint e percorre as
+páginas:
+
+```ts
+for await (const page of deletedAccounts.pages(storedCursor)) {
+  for (const { sub } of page.accounts) await eraseEverythingOf(sub);
+  if (page.cursor) await saveCursor(page.cursor);
+}
+```
+
+- Guarde o `cursor` só depois de apagar a página. Se algo falhar no meio, a leitura seguinte repete a
+  página, e apagar de novo não custa nada.
+- O SSO guarda a lista por 90 dias: leia pelo menos uma vez por mês. Uma vez por dia é o comum.
+- `page(after?)` lê uma página só. Os dois recusam com erro quando o SSO não anuncia
+  `deleted_accounts_endpoint`, recusa a aplicação ou responde fora do formato: nenhuma conta é pulada em
+  silêncio.
+
 ## Testes de integração
 
 `@pedrolucaslopes/sso-client/testing` cria sessão e token contra um SSO de verdade, substituindo o login

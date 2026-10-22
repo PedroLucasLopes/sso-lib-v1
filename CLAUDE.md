@@ -86,11 +86,14 @@ linha em que o krloc está; antes de aceitar uma linha nova do Nest, repita essa
 ### CI
 
 `.github/workflows/ci.yml` roda em pull request e push na `main`: `npm ci`, `npm audit` (produção sem
-aviso nenhum; o resto, sem alto), `lint:check` (o lint sem `--fix`), build e `npm pack --dry-run`, que
-mostra o que o pacote leva. O `publish.yml` repete auditoria e lint antes de publicar. As actions dos dois
-são fixadas por commit, cada job pede só a permissão que usa, e o Dependabot
-(`.github/dependabot.yml`) abre pull request para as actions e o npm toda semana. O teste de verdade da
-biblioteca continua sendo o `test:sso` do `krloc-api-v1`, contra um SSO de pé.
+aviso nenhum; o resto, sem alto), `lint:check` (o lint sem `--fix`), `npm test`, build e
+`npm pack --dry-run`, que mostra o que o pacote leva. O `publish.yml` repete auditoria, lint e testes
+antes de publicar. As actions dos dois são fixadas por commit, cada job pede só a permissão que usa, e o
+Dependabot (`.github/dependabot.yml`) abre pull request para as actions e o npm toda semana.
+
+Os **testes de unidade** (Vitest, `*.spec.ts` ao lado do código, fora do build e do pacote) cobrem o que
+roda sem um SSO de pé, contra um servidor falso. Começaram na `0.7.0`, com a lista de contas excluídas. O
+teste de verdade da biblioteca continua sendo o `test:sso` do `krloc-api-v1`, contra um SSO de pé.
 
 ---
 
@@ -482,6 +485,33 @@ marcado `@SsoAuthenticated()`: para exigir sessão num handler, a classe dele n�
 
 Há teste de regressão em `krloc/test/sso-e2e.js`, pela rota `/api/visitor`, em `GET` e `POST`.
 
+### 🗑️ Contas excluídas: a aplicação lê a lista, o SSO não avisa
+
+Quem exclui a própria conta no SSO (LGPD) some de lá, mas os dados dela continuam em cada aplicação em
+que esteve. O SSO grava o `sub` numa lista por aplicação, e a aplicação lê quando pode: o SSO não precisa
+alcançar ninguém, e aplicação fora do ar não perde aviso. O `SsoDeletedAccountsService` é o lado do
+cliente dessa lista, desde a `0.7.0`.
+
+| Método | O que faz |
+|---|---|
+| `page(after?)` | uma chamada a `deleted_accounts_endpoint`, com a mesma asserção de cliente (`private_key_jwt`) do token endpoint e da introspecção. Devolve `{ accounts: [{ sub, deletedAt }], cursor, hasMore }` |
+| `pages(after?)` | gerador assíncrono: pede a página seguinte com o `cursor` da anterior, até `hasMore` ser `false` |
+
+- **A aplicação guarda o cursor, e só depois de apagar a página.** Se algo cair no meio, a leitura
+  seguinte repete a página, e apagar de novo não custa nada. Guardar antes perderia contas.
+- **Nada é pulado em silêncio.** SSO que não anuncia o endpoint, recusa, resposta fora do formato e
+  `has_more` sem cursor novo viram erro. A recusa leva o `error` OAuth na mensagem: `invalid_client` é
+  chave revogada ou aplicação suspensa, `invalid_request` é cursor que não veio da lista. Pular uma
+  entrada malformada e guardar o cursor depois dela deixaria os dados daquela pessoa para sempre.
+- **O SSO guarda a lista por 90 dias**, até 500 contas por página, e só mostra quem passou pela
+  aplicação. Quem lê menos que isso perde aviso: uma leitura por dia é o comum.
+- O endpoint passa pelo mesmo mapeamento de endereço interno do discovery. A audiência da asserção
+  continua a URL pública do token endpoint, que é o que o SSO confere.
+- Não há rota nem agendamento aqui: a leitura é trabalho de fundo da aplicação, no ritmo dela.
+
+O teste fica em `src/service/deletedAccounts.service.spec.ts`, contra um SSO falso que confere a
+assinatura e as claims da asserção como o de verdade.
+
 ---
 
 ## 🧪 `@pedrolucaslopes/sso-client/testing`
@@ -521,7 +551,7 @@ src/
 ├─ error/                   # login_required, login recusado e SSO sem resposta: exceções, filtro, isPageNavigation
 ├─ testing/                 # ponto de entrada @pedrolucaslopes/sso-client/testing
 ├─ guard/                   # SsoRbacGuard
-└─ service/                 # discovery · jwks · client assertion · oauth · sessão
+└─ service/                 # discovery · jwks · client assertion · oauth · sessão · contas excluídas
 ```
 
 ---
@@ -734,3 +764,5 @@ linha, que sobrevive mal a uma variável de ambiente.
   quebra quem já instalou e pede versão `major`.
 - Configuração incompleta cita nomes, nunca valores: metade das variáveis é segredo.
 - O `cookie-parser` fica registrado pelo módulo. Tirar recria o laço de login silencioso numa API nova.
+- A lista de contas excluídas nunca pula conta: endpoint não anunciado, recusa, resposta fora do formato e
+  `has_more` sem cursor novo viram erro. Quem consome guarda o cursor só depois de apagar a página.
