@@ -44,10 +44,12 @@ jobs:
             exit 1
           fi
 
-      # Versao com dependencia vulneravel ou lint quebrado nao sai.
+      # Versao com dependencia vulneravel, lint quebrado ou teste falhando nao sai.
       - run: npm audit --omit=dev --audit-level=moderate
 
       - run: npm run lint:check
+
+      - run: npm test
 
       # `prepublishOnly` compila antes de empacotar.
       - run: npm publish
