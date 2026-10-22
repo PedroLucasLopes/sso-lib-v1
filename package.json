@@ -1,6 +1,6 @@
 {
   "name": "@pedrolucaslopes/sso-client",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Camada de autenticacao OAuth 2.0 + PKCE contra o SSO do rent_dashboard. NestJS module no padrao token-mediating backend (RFC 10017 secao 6.2).",
   "license": "UNLICENSED",
   "repository": {
@@ -19,6 +19,7 @@
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint \"src/**/*.ts\" --fix",
     "lint:check": "eslint \"src/**/*.ts\"",
+    "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
@@ -43,7 +44,8 @@
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "typescript": "^5.7.3",
-    "typescript-eslint": "^8.70.1"
+    "typescript-eslint": "^8.70.1",
+    "vitest": "^5.0.5"
   },
   "exports": {
     ".": {

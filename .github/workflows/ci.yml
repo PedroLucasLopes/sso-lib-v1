@@ -1,9 +1,11 @@
-# Integracao continua do sso-lib-v1: auditoria das dependencias, lint,
-# compilacao e o conteudo do pacote, em pull request e em push na main. A entrega
-# e o `publish.yml`, que publica no GitHub Packages quando chega uma tag v*.
+# Integracao continua do sso-lib-v1: auditoria das dependencias, lint, testes de
+# unidade, compilacao e o conteudo do pacote, em pull request e em push na main.
+# A entrega e o `publish.yml`, que publica no GitHub Packages quando chega uma
+# tag v*.
 #
-# O teste da biblioteca de verdade e o ponta a ponta do krloc-api-v1, que sobe a
-# API com ela contra um SSO de pe.
+# Os testes de unidade cobrem o que roda sem um SSO de pe, contra um servidor
+# falso. O teste da biblioteca de verdade continua sendo o ponta a ponta do
+# krloc-api-v1, que sobe a API com ela contra um SSO de pe.
 #
 # O pipeline tambem e superficie de ataque: cada action e fixada por commit, e
 # nao por tag, que pode ser movida; o token tem so leitura; e o checkout nao
@@ -51,6 +53,8 @@ jobs:
         run: npm audit --audit-level=high
 
       - run: npm run lint:check
+
+      - run: npm test
 
       - run: npm run build
 
