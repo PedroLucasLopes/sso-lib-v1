@@ -59,6 +59,7 @@ export interface AuthorizationServerMetadata {
   revocation_endpoint?: string;
   permissions_endpoint?: string;
   introspection_endpoint?: string;
+  deleted_accounts_endpoint?: string;
   jwks_uri: string;
 }
 
