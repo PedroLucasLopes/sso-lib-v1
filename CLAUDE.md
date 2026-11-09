@@ -86,14 +86,11 @@ linha em que o krloc está; antes de aceitar uma linha nova do Nest, repita essa
 ### CI
 
 `.github/workflows/ci.yml` roda em pull request e push na `main`: `npm ci`, `npm audit` (produção sem
-aviso nenhum; o resto, sem alto), `lint:check` (o lint sem `--fix`), `npm test`, build e
-`npm pack --dry-run`, que mostra o que o pacote leva. O `publish.yml` repete auditoria, lint e testes
-antes de publicar. As actions dos dois são fixadas por commit, cada job pede só a permissão que usa, e o
-Dependabot (`.github/dependabot.yml`) abre pull request para as actions e o npm toda semana.
-
-Os **testes de unidade** (Vitest, `*.spec.ts` ao lado do código, fora do build e do pacote) cobrem o que
-roda sem um SSO de pé, contra um servidor falso. Começaram na `0.7.0`, com a lista de contas excluídas. O
-teste de verdade da biblioteca continua sendo o `test:sso` do `krloc-api-v1`, contra um SSO de pé.
+aviso nenhum; o resto, sem alto), `lint:check` (o lint sem `--fix`), build e `npm pack --dry-run`, que
+mostra o que o pacote leva. O `publish.yml` repete auditoria e lint antes de publicar. As actions dos dois
+são fixadas por commit, cada job pede só a permissão que usa, e o Dependabot
+(`.github/dependabot.yml`) abre pull request para as actions e o npm toda semana. O teste de verdade da
+biblioteca continua sendo o `test:sso` do `krloc-api-v1`, contra um SSO de pé.
 
 ---
 
@@ -391,69 +388,10 @@ sessão continua 401, porque a pessoa precisa saber que tem de entrar.
 |---|---|
 | `@SsoPublic()` | ignora sessão e RBAC. É o nível do health check |
 | `@SsoLogin()` | rota do fluxo de login, onde ainda não há sessão |
-| `@SsoOptional()` | lê a sessão ou o Bearer quando houver e preenche `@CurrentUser()`; sem credencial, segue sem usuário. Nunca manda ao login. É o nível da página pública que quer saber quem entrou |
 | `@SsoAuthenticated()` | exige sessão válida, dispensa a checagem de permissão por rota |
 | _(nenhum)_ | exige sessão **e** permissão do papel para a rota. Sem ela, 404 |
 | `@CurrentUser()` | injeta a identidade resolvida no handler |
 | `@CurrentToken()` | injeta o access token já verificado, para repassar adiante |
-
-### 👤 `@SsoOptional()`: página pública que sabe quem entrou
-
-`@SsoPublic()` retorna antes de ler qualquer coisa, e é o certo para o health check. Uma página pública
-de produto, como busca, mapa ou orçamento, quer outra coisa: atender quem não entrou e, se alguém
-entrou, saber quem é, sem nunca mandar ninguém ao login.
-
-| Chegou | O guard faz |
-|---|---|
-| nada: sem `Authorization: Bearer` e sem cookie de sessão legível | segue sem usuário. Não fala com o SSO e não escreve cookie |
-| sessão viva | o mesmo da rota autenticada: verificação, renovação silenciosa, introspecção, `Authorization` hidratado e `@CurrentUser()` preenchido. Sem RBAC por rota, como em `@SsoAuthenticated()` |
-| sessão morta: renovação recusada, grant inativo, token renovado que não verifica | apaga o cookie e segue sem usuário. Nunca `login_required` |
-| `Authorization: Bearer` válido | a identidade do token, como na rota autenticada |
-| `Authorization: Bearer` inválido ou revogado | `401` com `error: "invalid_token"`, como sempre |
-| escrita (`POST`, `PUT`, `PATCH`, `DELETE`) com sessão | exige o `X-CSRF-Token` e recusa `Origin` de outro site, como sempre |
-
-Quando ninguém entrou, o handler recebe `undefined` em `@CurrentUser()` e em `@CurrentToken()`.
-
-**Sessão morta vira visitante; Bearer inválido, não.** O cookie vai sozinho em toda requisição, sem o
-front pedir, e uma página pública que respondesse 401 por causa dele mandaria ao login quem só queria
-olhar. O Bearer é explícito: quem mandou um token ruim errou, e precisa saber.
-
-**O CSRF continua.** Numa rota opcional, uma escrita forjada com o cookie da vítima agiria em nome dela,
-por exemplo salvando um rascunho na conta dela. Sem cookie, a escrita é anônima e não há sessão para
-forjar, então passa sem o header.
-
-**O nível mais aberto vence**, entre o do handler e o da classe, nesta ordem: `@SsoPublic()`,
-`@SsoLogin()`, `@SsoOptional()`, `@SsoAuthenticated()`. `@SsoOptional()` na classe abre também o handler
-marcado `@SsoAuthenticated()`: para exigir sessão num handler, a classe dele não pode ser opcional.
-
-Há teste de regressão em `krloc/test/sso-e2e.js`, pela rota `/api/visitor`, em `GET` e `POST`.
-
-### 🗑️ Contas excluídas: a aplicação lê a lista, o SSO não avisa
-
-Quem exclui a própria conta no SSO (LGPD) some de lá, mas os dados dela continuam em cada aplicação em
-que esteve. O SSO grava o `sub` numa lista por aplicação, e a aplicação lê quando pode: o SSO não precisa
-alcançar ninguém, e aplicação fora do ar não perde aviso. O `SsoDeletedAccountsService` é o lado do
-cliente dessa lista, desde a `0.7.0`.
-
-| Método | O que faz |
-|---|---|
-| `page(after?)` | uma chamada a `deleted_accounts_endpoint`, com a mesma asserção de cliente (`private_key_jwt`) do token endpoint e da introspecção. Devolve `{ accounts: [{ sub, deletedAt }], cursor, hasMore }` |
-| `pages(after?)` | gerador assíncrono: pede a página seguinte com o `cursor` da anterior, até `hasMore` ser `false` |
-
-- **A aplicação guarda o cursor, e só depois de apagar a página.** Se algo cair no meio, a leitura
-  seguinte repete a página, e apagar de novo não custa nada. Guardar antes perderia contas.
-- **Nada é pulado em silêncio.** SSO que não anuncia o endpoint, recusa, resposta fora do formato e
-  `has_more` sem cursor novo viram erro. A recusa leva o `error` OAuth na mensagem: `invalid_client` é
-  chave revogada ou aplicação suspensa, `invalid_request` é cursor que não veio da lista. Pular uma
-  entrada malformada e guardar o cursor depois dela deixaria os dados daquela pessoa para sempre.
-- **O SSO guarda a lista por 90 dias**, até 500 contas por página, e só mostra quem passou pela
-  aplicação. Quem lê menos que isso perde aviso: uma leitura por dia é o comum.
-- O endpoint passa pelo mesmo mapeamento de endereço interno do discovery. A audiência da asserção
-  continua a URL pública do token endpoint, que é o que o SSO confere.
-- Não há rota nem agendamento aqui: a leitura é trabalho de fundo da aplicação, no ritmo dela.
-
-O teste fica em `src/service/deletedAccounts.service.spec.ts`, contra um SSO falso que confere a
-assinatura e as claims da asserção como o de verdade.
 
 ---
 
@@ -494,7 +432,7 @@ src/
 ├─ error/                   # login_required e login recusado: exceções, filtro, isPageNavigation
 ├─ testing/                 # ponto de entrada @pedrolucaslopes/sso-client/testing
 ├─ guard/                   # SsoRbacGuard
-└─ service/                 # discovery · jwks · client assertion · oauth · sessão · contas excluídas
+└─ service/                 # discovery · jwks · client assertion · oauth · sessão
 ```
 
 ---
@@ -647,12 +585,6 @@ linha, que sobrevive mal a uma variável de ambiente.
 - O caminho da requisição é sempre texto testado, nunca padrão.
 - Algoritmo de assinatura é allowlist fechada, nunca lido do token.
 - Rota sem decorator nega. Não inverta esse padrão.
-- Rota `@SsoOptional()` nunca devolve `login_required`. Sem credencial, segue sem usuário e sem falar
-  com o SSO; com sessão morta, apaga o cookie e segue sem usuário. Bearer inválido continua `401`
-  `invalid_token`, e escrita com sessão continua exigindo o `X-CSRF-Token`.
-- Entre handler e classe, vence o nível mais aberto: `@SsoPublic()`, `@SsoLogin()`, `@SsoOptional()`,
-  `@SsoAuthenticated()`. Mudar essa ordem abre ou fecha rota de quem já instalou, e pede `major`.
-- Nível de acesso novo é `minor`: rota que não o usa não muda de comportamento.
 - Rota negada devolve o 404 do roteador, `Cannot <MÉTODO> <URL>`, sem `WWW-Authenticate`. Um 403 ali
   revelaria que a rota existe.
 - As outras recusas do guard saem com código no campo `error`: `login_required`, `invalid_token`,
@@ -695,5 +627,3 @@ linha, que sobrevive mal a uma variável de ambiente.
   quebra quem já instalou e pede versão `major`.
 - Configuração incompleta cita nomes, nunca valores: metade das variáveis é segredo.
 - O `cookie-parser` fica registrado pelo módulo. Tirar recria o laço de login silencioso numa API nova.
-- A lista de contas excluídas nunca pula conta: endpoint não anunciado, recusa, resposta fora do formato e
-  `has_more` sem cursor novo viram erro. Quem consome guarda o cursor só depois de apagar a página.

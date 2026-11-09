@@ -64,9 +64,6 @@ export class SsoDiscoveryService {
       introspection_endpoint: metadata.introspection_endpoint
         ? this.toInternal(metadata.introspection_endpoint)
         : undefined,
-      deleted_accounts_endpoint: metadata.deleted_accounts_endpoint
-        ? this.toInternal(metadata.deleted_accounts_endpoint)
-        : undefined,
       token_endpoint_public: metadata.token_endpoint,
     };
   }
