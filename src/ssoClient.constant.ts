@@ -10,8 +10,6 @@ export const SSO_LEVEL_PUBLIC = 'sso:public';
 
 export const SSO_LEVEL_LOGIN = 'sso:login';
 
-export const SSO_LEVEL_OPTIONAL = 'sso:optional';
-
 export const SSO_LEVEL_AUTHENTICATED = 'sso:authenticated';
 
 export const SSO_FRESH_GRANT = 'sso:fresh-grant';

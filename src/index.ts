@@ -3,7 +3,6 @@ export { SsoClientModule } from './ssoClient.module';
 export {
   SsoPublic,
   SsoLogin,
-  SsoOptional,
   SsoAuthenticated,
   SsoFreshGrant,
   CurrentUser,
@@ -22,11 +21,6 @@ export { SsoJwksVerifierService } from './service/jwksVerifier.service';
 export { SsoPermissionsService } from './service/permissions.service';
 export { SsoIntrospectionService } from './service/introspection.service';
 export type { SsoGrantState } from './service/introspection.service';
-export { SsoDeletedAccountsService } from './service/deletedAccounts.service';
-export type {
-  SsoDeletedAccount,
-  SsoDeletedAccountsPage,
-} from './service/deletedAccounts.service';
 export { SsoDiscoveryService } from './service/discovery.service';
 export { SsoClientAssertionService } from './service/clientAssertion.service';
 export { SsoCookieService } from './cookie/cookie.service';

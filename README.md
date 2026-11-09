@@ -85,16 +85,11 @@ sem mostrar valor nenhum.
 | Decorator | Efeito |
 |---|---|
 | `@SsoPublic()` | ignora sessão e RBAC. É o nível do health check |
-| `@SsoOptional()` | rota pública que reconhece quem entrou: com sessão ou Bearer, preenche `@CurrentUser()`; sem credencial, ou com a sessão morta, segue sem usuário e nunca manda ao login |
 | `@SsoAuthenticated()` | exige sessão, dispensa a permissão por rota |
 | _(nenhum)_ | exige sessão **e** permissão. Sem ela, o mesmo 404 de uma rota que não existe |
-| `@CurrentUser()` | injeta a identidade no handler. Em rota opcional, `undefined` quando ninguém entrou |
+| `@CurrentUser()` | injeta a identidade no handler |
 | `@CurrentToken()` | injeta o access token verificado, para repassar adiante |
 | `@SsoFreshGrant()` | pergunta ao SSO em toda chamada, sem esperar a janela. `/auth/me` e `/auth/token` já usam |
-
-Na rota opcional, Bearer inválido continua `401` com `invalid_token`, e escrita com sessão continua
-exigindo o `X-CSRF-Token`. Entre handler e classe vence o nível mais aberto: `@SsoOptional()` na classe
-abre também o handler marcado `@SsoAuthenticated()`.
 
 O que muda no console do SSO vale na API em até 30 segundos, sem novo login. O guard pergunta ao SSO
 (introspecção, RFC 7662) se o grant do token vale e qual é o papel de agora: papel trocado decide a
@@ -142,27 +137,6 @@ tempos e na volta à aba. Os fronts do ecossistema fazem a cada 30 segundos.
 `SsoClientModule.forRootFromEnv({ cookiePrefix: 'minha_api' })` fixa no código o que a aplicação
 preferir, e o resto continua vindo do ambiente. Para montar as opções de outro jeito, `forRoot` e
 `forRootAsync` continuam disponíveis, e `ssoClientOptionsFromEnv()` devolve o objeto sem registrar nada.
-
-## Contas que a pessoa excluiu
-
-Quem exclui a própria conta no SSO entra numa lista que cada aplicação em que a pessoa esteve lê
-quando quiser, para apagar os dados dela. O `SsoDeletedAccountsService`, injetável como os outros
-serviços do módulo, lê essa lista com a mesma asserção de cliente do token endpoint e percorre as
-páginas:
-
-```ts
-for await (const page of deletedAccounts.pages(storedCursor)) {
-  for (const { sub } of page.accounts) await eraseEverythingOf(sub);
-  if (page.cursor) await saveCursor(page.cursor);
-}
-```
-
-- Guarde o `cursor` só depois de apagar a página. Se algo falhar no meio, a leitura seguinte repete a
-  página, e apagar de novo não custa nada.
-- O SSO guarda a lista por 90 dias: leia pelo menos uma vez por mês. Uma vez por dia é o comum.
-- `page(after?)` lê uma página só. Os dois recusam com erro quando o SSO não anuncia
-  `deleted_accounts_endpoint`, recusa a aplicação ou responde fora do formato: nenhuma conta é pulada em
-  silêncio.
 
 ## Testes de integração
 
