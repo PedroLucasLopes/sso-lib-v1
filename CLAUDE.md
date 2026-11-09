@@ -52,6 +52,9 @@ tem de ser o dono no GitHub, em minúsculas.
 - **Instalar:** `.npmrc` com `@pedrolucaslopes:registry=https://npm.pkg.github.com` e
   `//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}`. O token, com `read:packages`, vem do
   ambiente. No Docker entra como secret do BuildKit, nunca como `ARG` ou `ENV`, que ficam na imagem.
+- **Próxima versão: 0.8.0 ou maior.** A 0.6.0 (`@SsoOptional`) e a 0.7.0 (lista de contas excluídas)
+  foram publicadas e saíram do código em 09/11/2026, quando o Meet Me deixou o SSO; o `package.json` voltou
+  à 0.5.0, e o registro não aceita publicar de novo um número que já existe.
 
 Publicado desde a `0.1.0`. Quem consome instala por versão, e o krloc faz exatamente isso: não há
 workspace npm nem link de pasta. Para testar uma mudança antes de publicar, `npm pack` aqui e
